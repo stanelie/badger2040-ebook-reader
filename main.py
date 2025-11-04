@@ -235,7 +235,7 @@ def reset_book():
             save_index(INDEX_FILE)
     if next_page < len(page_offsets):
         render_page(page_offsets[next_page], draw=True, remainder=page_remainders.get(next_page, b""))
-    display.update()
+    display.update(); display.update()
 
 # ---------------- FILE PICKER -----------------
 LIST_LINE_HEIGHT = LINE_HEIGHT
@@ -324,7 +324,7 @@ if next_page == len(page_offsets):
         save_index(INDEX_FILE)
 if next_page < len(page_offsets):
     render_page(page_offsets[next_page], draw=True, remainder=page_remainders.get(next_page, b""))
-display.update()
+display.update(); display.update()
 
 # ---------------- MAIN LOOP -----------------
 FAST_ADVANCE_PAGES = 200  # Number of pages to skip on long-press down
@@ -343,62 +343,54 @@ while True:
         display.led(50)
 
         if press_duration > 700:  # long press: fast advance
-            FAST_ADVANCE_PAGES = 20  # or keep the global
+            print("Fast advancing...")
             target_page = state["current_page"] + FAST_ADVANCE_PAGES
             current = state["current_page"]
 
-            # Try to advance up to FAST_ADVANCE_PAGES times
+            last_remainder = page_remainders.get(current, b"")
             for _ in range(FAST_ADVANCE_PAGES):
                 next_page = current + 1
 
-                # If we already have offset for next_page, just advance current
-                if next_page < len(page_offsets):
-                    # ensure remainder exists for next_page (if not, compute)
-                    if next_page not in page_remainders:
-                        prev_remainder = page_remainders.get(current, b"")
-                        # compute remainder for next_page silently
-                        _, rem_next = render_page(page_offsets[current], draw=False, remainder=prev_remainder)
-                        page_remainders[next_page] = rem_next
-                    current = next_page
-                    if current >= target_page:
-                        break
-                    continue
+                # If we reached or passed end of offsets, generate next offset
+                if next_page >= len(page_offsets):
+                    next_offset, rem_next = render_page(page_offsets[current], draw=False, remainder=last_remainder)
+                    if next_offset <= page_offsets[current]:
+                        break  # end of book
+                    page_offsets.append(next_offset)
+                    last_remainder = rem_next
+                else:
+                    # Precompute remainder if not cached
+                    _, rem_next = render_page(page_offsets[current], draw=False, remainder=last_remainder)
+                    last_remainder = rem_next
 
-                # next_page offset doesn't exist yet — compute it from current page
-                prev_remainder = page_remainders.get(current, b"")
-                next_offset, rem_next = render_page(page_offsets[current], draw=False, remainder=prev_remainder)
+                current = next_page
+                gc.collect()
 
-                # If the returned offset moves forward, append it and advance
+                if current >= target_page:
+                    break
+
+            # Store remainder for the final page we land on
+            page_remainders[current] = last_remainder
+
+            # ✅ Precompute the *next* page offset so "down" works normally
+            next_page = current + 1
+            if next_page >= len(page_offsets):
+                next_offset, rem_next = render_page(page_offsets[current], draw=False, remainder=last_remainder)
                 if next_offset > page_offsets[current]:
                     page_offsets.append(next_offset)
                     page_remainders[next_page] = rem_next
-                    current = next_page
-                    if current >= target_page:
-                        break
-                else:
-                    # Reached true end of book, stop advancing
-                    break
 
-            # Finalize: set current page, render it visibly, store remainder
-            state["current_page"] = current
-            remainder = page_remainders.get(current, b"")
-            # If there is no remainder for this page (rare), pass empty remainder
-            next_offset_vis, rem_vis = render_page(page_offsets[current], draw=True, remainder=remainder)
-            page_remainders[current] = rem_vis  # store updated remainder for the current page
-
-            # Pre-buffer the next page silently so a normal short press will work
-            next_page = current + 1
-            if next_page >= len(page_offsets):
-                prev_remainder = page_remainders.get(current, b"")
-                next_offset2, rem_next2 = render_page(page_offsets[current], draw=False, remainder=prev_remainder)
-                if next_offset2 > page_offsets[current]:
-                    page_offsets.append(next_offset2)
-                    page_remainders[next_page] = rem_next2
-
-            # One display update and one index/state save at the end
+            # Now render and display the final visible page
+            render_page(page_offsets[current], draw=True, remainder=last_remainder)
             display.update(); display.update()
+
+            # Save updated index and state
             save_index(INDEX_FILE)
+            state["current_page"] = current
             state_save(state)
+            gc.collect()
+
+
 
 
         else:
@@ -406,8 +398,7 @@ while True:
             current = state["current_page"] + 1
             if current < len(page_offsets):
                 state["current_page"] = current
-                display.update()
-                display.update()
+                display.update(); display.update()
                 state_save(state)
                 next_page = current + 1
                 remainder = page_remainders.get(current, b"")
@@ -437,8 +428,7 @@ while True:
         state["current_page"] = current
         remainder = page_remainders.get(current, b"")
         render_page(page_offsets[current], draw=True, remainder=remainder)
-        display.update()
-        display.update()
+        display.update(); display.update()
         next_page = current + 1
         if next_page < len(page_offsets):
             render_page(page_offsets[next_page], draw=True, remainder=page_remainders.get(next_page, b""))
