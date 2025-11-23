@@ -2,13 +2,7 @@
 CircuitPython E-book Reader for Badger 2040
 Ported from MicroPython to use uc8151_circuitpython driver
 
-FINAL VERSION 2.20 (FORCED SKIP FIX):
-- FIXED: Infinite page loop caused by long lines that wrap perfectly, 
-         which returned the same offset/remainder for the next page.
-- Implements a targeted 'forced skip' logic: when the loop condition 
-  (identical next_offset and next_remainder) is met, the code re-runs 
-  pagination with an empty remainder to force the file stream to advance 
-  past the problematic line, effectively breaking the index loop.
+
 """
 import board
 import displayio
@@ -222,90 +216,95 @@ def paginate_text(file_path, start_offset, remainder=b""):
         with open(file_path, "rb") as f:
             f.seek(start_offset)
             lines = []
+            line_count = 0
+            next_offset = -1
             
-            current_buffer = remainder
-            line_start_offset = start_offset
-            
-            for _ in range(LINES_PER_PAGE):
+            while line_count < LINES_PER_PAGE:
+                pos = f.tell()
                 
-                # 1. Ensure we have raw bytes to process
-                if not current_buffer:
-                    line_start_offset = f.tell()
+                if remainder:
+                    line_bytes = remainder
+                    f.seek(start_offset + len(remainder))
+                    remainder = b""
+                else:
                     line_bytes = f.readline()
-                    
-                    if not line_bytes:
-                        next_offset = f.tell()
-                        print(f"DEBUG: Paginate END OF FILE. next_offset={next_offset}")
-                        break
-                        
-                    current_buffer = line_bytes.rstrip(b"\r\n")
-                    print(f"DEBUG: Read file. line_start_offset={line_start_offset}, line_len={len(line_bytes)}")
-                    
-                # 2. Word Wrapping - WORK WITH ORIGINAL BYTES
-                original_bytes = current_buffer  # Keep original bytes!
-                current_buffer = current_buffer.lstrip(b" \t")
                 
-                if not current_buffer:
+                if not line_bytes:
+                    next_offset = f.tell()
+                    break
+                
+                line = line_bytes.rstrip(b"\r\n")
+                
+                # Handle empty lines
+                if not line:
                     lines.append(b"")
-                    current_buffer = b""
+                    line_count += 1
+                    if line_count >= LINES_PER_PAGE:
+                        next_offset = f.tell()
+                        break
                     continue
-                    
-                # Decode for display logic only
-                try:
-                    line_str = current_buffer.decode("utf-8", "ignore")
-                except:
-                    line_str = current_buffer.decode("latin-1", "ignore")
-                    
-                words = line_str.split(" ")
                 
-                line_to_display = ""
-                byte_idx = 0  # Track position in ORIGINAL current_buffer bytes
+                # Decode - match MicroPython exactly
+                try:
+                    line_str = line.decode("utf-8", "ignore")
+                except:
+                    try:
+                        line_str = line.decode("latin-1", "ignore")
+                    except:
+                        # Last resort: treat as ASCII, skip non-ASCII bytes
+                        line_str = ''.join(chr(b) if b < 128 else '?' for b in line)
+                
+                # Clean unicode
+                line_str = line_str.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
+                           .replace("\u2014", "-").replace("\u2013", "-").replace("…", "...")
+                
+                words = line_str.split(" ")
+                current = ""
+                byte_idx = 0
                 
                 for i, word in enumerate(words):
                     if not word:
-                        byte_idx += 1  # Skip the space
+                        byte_idx += 1
                         continue
                     
-                    appended = line_to_display + " " + word if line_to_display else word
+                    appended = current + " " + word if current else word
                     
                     if len(appended) <= MAX_CHARS:
-                        line_to_display = appended
-                        # Track bytes: word + space (if not last)
-                        word_bytes = word.encode("utf-8", "ignore")
-                        byte_idx += len(word_bytes)
-                        if i < len(words) - 1:
-                            byte_idx += 1  # Space after word
+                        current = appended
+                        byte_idx += len(word.encode("utf-8", "ignore")) + (1 if i < len(words)-1 else 0)
                     else:
-                        # Line break needed!
-                        # Remainder is the REST of the original bytes
-                        current_buffer = current_buffer[byte_idx:]
-                        break
-                else:
-                    # All words fit, no remainder from this line
-                    current_buffer = b""
+                        # Line break
+                        lines.append(current.encode("utf-8", "ignore"))
+                        line_count += 1
+                        
+                        if line_count >= LINES_PER_PAGE:
+                            remainder = line_bytes[byte_idx:]
+                            next_offset = pos + byte_idx
+                            break
+                        
+                        current = word
+                        byte_idx += len(word.encode("utf-8", "ignore")) + (1 if i < len(words)-1 else 0)
                 
-                # Encode the finished line for the current page
-                lines.append(line_to_display.encode("utf-8", "ignore"))
-
-            # 4. Calculate the final next_offset and remainder
-            if current_buffer:
-                # Page is full, broke mid-line
-                # Calculate how many bytes we consumed from the original line
-                bytes_consumed = len(original_bytes) - len(current_buffer)
-                next_offset = line_start_offset + bytes_consumed
-                final_remainder = current_buffer
-            else:
-                # Consumed the last file line fully
-                next_offset = f.tell()
-                final_remainder = b""
-
-            print(f"DEBUG: Paginate finished. next_offset={next_offset}, final_rem_len={len(final_remainder)}")
-            gc.collect()
-            return lines, next_offset, final_remainder
+                # Break check
+                if next_offset != -1:
+                    break
+                
+                # Add final line content
+                if current:
+                    lines.append(current.encode("utf-8", "ignore"))
+                    line_count += 1
+                
+                if line_count >= LINES_PER_PAGE:
+                    next_offset = f.tell()
+                    break
             
-    except OSError:
-        gc.collect()
-        return [], start_offset, b""
+            if next_offset == -1:
+                next_offset = f.tell()
+            
+            print(f"DEBUG: Paginate finished. next_offset={next_offset}, final_rem_len={len(remainder)}")
+            gc.collect()
+            return lines, next_offset, remainder
+            
     except Exception as e:
         print(f"ERROR: Paginate failure: {e}")
         import traceback
@@ -414,13 +413,17 @@ def update_display_fast(rotated_buffer):
     display.rotation = old_rot
 
 # ---------------- INDEX STORAGE -----------------
-def save_index(file_path):
+def save_index(file_path, current_page=0):
     global page_offsets, page_remainders
     try:
         with open(file_path, "wb") as f:
+            # Save current page first
+            f.write(struct.pack("<I", current_page))
+            # Save offsets
             f.write(struct.pack("<I", len(page_offsets)))
             for offset in page_offsets:
                 f.write(struct.pack("<I", offset))
+            # Save remainders
             keys = list(page_remainders.keys())
             f.write(struct.pack("<I", len(keys)))
             for k in keys:
@@ -435,6 +438,9 @@ def load_index(file_path):
     global page_offsets, page_remainders
     try:
         with open(file_path, "rb") as f:
+            # Load current page first
+            saved_page = struct.unpack("<I", f.read(4))[0]
+            # Load offsets
             num_offsets = struct.unpack("<I", f.read(4))[0]
             page_offsets = []
             for _ in range(num_offsets):
@@ -449,9 +455,11 @@ def load_index(file_path):
                     page_remainders[k] = rem
             except:
                 pass
+            return saved_page
     except Exception:
         page_offsets = [0]
         page_remainders = {}
+        return 0
 
 # ---------------- FILE PICKER -----------------
 def list_books():
@@ -468,7 +476,6 @@ def file_picker():
     global end_of_index_reached
     books = list_books()
     if not books:
-        # Clear screen using large font
         display.fb.fill(0)
         display.text("No books found!", 10, 40, 1)
         display.update()
@@ -477,87 +484,158 @@ def file_picker():
     
     selected = 0
     offset = 0
+    prev_offset = -1
     per_page = 6
     
+    # Pre-rendered buffers for each selection position
+    selection_buffers = []
+    
     while True:
-        # Drawing to raw_working_buffer (Landscape)
-        for i in range(len(raw_working_buffer)): raw_working_buffer[i] = 0
-        temp_fb = adafruit_framebuf.FrameBuffer(raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB)
-        
-        old_fb = display.fb
-        old_raw_fb = display.raw_fb
-        display.fb = temp_fb
-        display.raw_fb = raw_working_buffer
-        
-        try:
-            temp_fb.fill(0)
-            display.text("Select Book:", 5, 5, 1)
+        # Pre-render all selection positions when page changes
+        if offset != prev_offset:
+            t_start = time.monotonic()
+            print(f"[PICKER] Pre-rendering all {per_page} selection states...")
             
-            for i in range(per_page):
-                idx = offset + i
-                if idx >= len(books): break
-                name = books[idx].split("/")[-1]
-                if len(name) > 25: name = name[:22] + "..."
-                y = 25 + i * 16
-                if idx == selected:
-                    display.fb.fill_rect(2, y-2, WIDTH-4, 16, 1)
-                    # Note: display.text here uses vga2_8x16 (the external_font)
-                    display.text(name, 5, y, 0) 
-                else:
-                    display.text(name, 5, y, 1)
-                    
-            # ----------------- Bottom Status Bar -----------------
+            selection_buffers = []
             
-            # 1. Page Count (vga2_8x16 font)
-            if len(books) > per_page:
-                page = offset // per_page + 1
-                total = (len(books) + per_page - 1) // per_page
-                display.text(f"{page}/{total}", WIDTH - (vga2_8x16.WIDTH * 5), HEIGHT - vga2_8x16.HEIGHT - 10, 1)
+            # Render each possible selection position
+            for sel_idx in range(per_page):
+                book_idx = offset + sel_idx
+                if book_idx >= len(books):
+                    break
                 
-            # 2. Storage Status (5x8 font) - Absolute bottom right
-            storage_status = get_storage_status()
+                # Clear and render
+                for i in range(len(raw_working_buffer)): raw_working_buffer[i] = 0
+                temp_fb = adafruit_framebuf.FrameBuffer(raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB)
+                
+                old_fb = display.fb
+                old_raw_fb = display.raw_fb
+                display.fb = temp_fb
+                display.raw_fb = raw_working_buffer
+                
+                try:
+                    temp_fb.fill(0)
+                    display.text("Select Book:", 5, 5, 1)
+                    
+                    # Render all books, highlighting the current selection
+                    for i in range(per_page):
+                        idx = offset + i
+                        if idx >= len(books): break
+                        name = books[idx].split("/")[-1]
+                        if len(name) > 25: name = name[:22] + "..."
+                        y = 25 + i * 16
+                        
+                        if i == sel_idx:  # This is the selected item for this buffer
+                            display.fb.fill_rect(2, y-2, WIDTH-4, 16, 1)
+                            display.text(name, 5, y, 0)
+                        else:
+                            display.text(name, 5, y, 1)
+                    
+                    # Status bar
+                    if len(books) > per_page:
+                        page = offset // per_page + 1
+                        total = (len(books) + per_page - 1) // per_page
+                        display.text(f"{page}/{total}", WIDTH - (vga2_8x16.WIDTH * 5), HEIGHT - vga2_8x16.HEIGHT - 10, 1)
+                        
+                    storage_status = get_storage_status()
+                    STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING
+                    STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING 
+                    temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
+                    
+                finally:
+                    display.fb = old_fb
+                    display.raw_fb = old_raw_fb
+                
+                # Rotate and store
+                rotated = display._rotate_framebuffer(raw_working_buffer)
+                buffer_copy = bytearray(len(rotated))
+                for i in range(len(rotated)):
+                    buffer_copy[i] = rotated[i]
+                selection_buffers.append(buffer_copy)
             
-            STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING
-            STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING 
+            prev_offset = offset
             
-            # Draw using the adafruit_framebuf's 5x8 font
-            temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
-            # -----------------------------------------------------
+            # Adjust selected to be within the current page
+            if selected < offset:
+                selected = offset
+            elif selected >= offset + len(selection_buffers):
+                selected = offset + len(selection_buffers) - 1
             
-        finally:
-            display.fb = old_fb
-            display.raw_fb = old_raw_fb
+            print(f"[PICKER] Pre-render complete: {(time.monotonic() - t_start)*1000:.1f}ms for {len(selection_buffers)} buffers")
+            
+            # Initial display
+            sel_index_on_page = selected - offset
+            if 0 <= sel_index_on_page < len(selection_buffers):
+                t_start = time.monotonic()
+                old_rot = display.rotation
+                display.rotation = 0
+                display.update(fb=selection_buffers[sel_index_on_page])
+                display.rotation = old_rot
+                print(f"[PICKER] Initial display update: {(time.monotonic() - t_start)*1000:.1f}ms")
         
-        # Rotation and Update
-        rotated = display._rotate_framebuffer(raw_working_buffer)
-        old_rot = display.rotation
-        display.rotation = 0
-        display.update(fb=rotated)
-        display.rotation = old_rot
+        # Button handling - just swap buffers!
+        if button_pressed(buttons["down"]):
+            print(f"[PICKER] DOWN pressed")
+            t_start = time.monotonic()
+            
+            selected = (selected + 1) % len(books)
+            
+            # Check if we need to change page
+            if selected < offset or selected >= offset + per_page:
+                offset = (selected // per_page) * per_page
+                # This will trigger pre-render on next loop iteration
+            else:
+                # Same page - just swap buffer
+                sel_index_on_page = selected - offset
+                if 0 <= sel_index_on_page < len(selection_buffers):
+                    old_rot = display.rotation
+                    display.rotation = 0
+                    display.update(fb=selection_buffers[sel_index_on_page])
+                    display.rotation = old_rot
+                    print(f"[PICKER] Display update: {(time.monotonic() - t_start)*1000:.1f}ms")
+            
+            time.sleep(0.15)
+            
+        elif button_pressed(buttons["up"]):
+            print(f"[PICKER] UP pressed")
+            t_start = time.monotonic()
+            
+            selected = (selected - 1) % len(books)
+            
+            # Check if we need to change page
+            if selected < offset or selected >= offset + per_page:
+                offset = (selected // per_page) * per_page
+                # This will trigger pre-render on next loop iteration
+            else:
+                # Same page - just swap buffer
+                sel_index_on_page = selected - offset
+                if 0 <= sel_index_on_page < len(selection_buffers):
+                    old_rot = display.rotation
+                    display.rotation = 0
+                    display.update(fb=selection_buffers[sel_index_on_page])
+                    display.rotation = old_rot
+                    print(f"[PICKER] Display update: {(time.monotonic() - t_start)*1000:.1f}ms")
+            
+            time.sleep(0.15)
+            
+        elif button_pressed(buttons["a"]) or button_pressed(buttons["c"]):
+            while button_pressed(buttons["a"]) or button_pressed(buttons["c"]):
+                time.sleep(0.05)
+            end_of_index_reached = False
+            return books[selected]
+            
+        elif button_pressed(buttons["b"]):
+            while button_pressed(buttons["b"]):
+                time.sleep(0.05)
+            return None
         
-        while True:
-            if button_pressed(buttons["down"]):
-                selected = (selected + 1) % len(books)
-                if selected < offset: offset = selected
-                elif selected >= offset + per_page: offset = selected - per_page + 1
-                time.sleep(0.15)
-                break
-            if button_pressed(buttons["up"]):
-                selected = (selected - 1) % len(books)
-                if selected < offset: offset = selected
-                elif selected >= offset + per_page: offset = selected - per_page + 1
-                time.sleep(0.15)
-                break
-            if button_pressed(buttons["a"]) or button_pressed(buttons["c"]):
-                time.sleep(0.2)
-                end_of_index_reached = False # Reset flag on book change
-                return books[selected]
-            if button_pressed(buttons["b"]):
-                time.sleep(0.2)
-                return None
-            time.sleep(0.05)
+        time.sleep(0.05)
 
 # ---------------- MAIN -----------------
+# Re-enable power on boot/wake
+board.ENABLE_DIO.value = True
+time.sleep(0.1)  # Allow power rails to stabilize
+
 led_on()
 state = state_load()
 text_file = state.get("last_book", "")
@@ -578,14 +656,16 @@ INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
 
 try:
     os.stat(INDEX_FILE)
-    load_index(INDEX_FILE)
+    current = load_index(INDEX_FILE)  # Get saved page from index
 except OSError:
     page_offsets = [0]
     page_remainders = {}
+    current = 0
     
 end_of_index_reached = False # Initial reset of flag
 
-current = min(state.get("current_page", 0), max(0, len(page_offsets)-1))
+# Enforce boundaries
+current = min(current, max(0, len(page_offsets)-1))
 state["current_page"] = current
 
 print("Initial render...")
@@ -604,7 +684,7 @@ if current + 1 >= len(page_offsets):
      if lines and advanced:
          page_offsets.append(next_off)
          page_remainders[current+1] = next_rem
-         save_index(INDEX_FILE) # Save newly created index
+         save_index(INDEX_FILE, current) # Save newly created index
      else:
          end_of_index_reached = True
 
@@ -621,124 +701,157 @@ while True:
         last_activity = time.monotonic()
         
     # PAGE DOWN
-    if button_pressed(buttons["down"]):
+    if button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
+        # Detect long press
+        press_start = time.monotonic()
+        while button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
+            time.sleep(0.05)
+        press_duration = time.monotonic() - press_start
         
         led_on() # IMMEDIATE FEEDBACK
         
-        if current + 1 < len(page_offsets) and next_page_ready:
-            # Instant swap (indexed page)
-            current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
-            update_display_fast(current_rotated_buffer)
-            current += 1
-            next_page_ready = False
-            print(f"DEBUG: Page Down to P{current}. Used pre-indexed page.")
-            end_of_index_reached = False # Reset flag on successful advance
+        if press_duration > 0.7:  # Long press: 50-page fast advance
+            print("DEBUG: Long press detected - advancing 50 pages")
             
-        elif current + 1 < len(page_offsets):
-            # Demand render (indexed page)
-            current += 1
+            FAST_ADVANCE_PAGES = 50
+            target_page = current + FAST_ADVANCE_PAGES
+            
+            # Track remainder through the loop (CRITICAL!)
+            last_remainder = page_remainders.get(current, b"")
+            
+            # Fast-forward through pages without rendering
+            for _ in range(FAST_ADVANCE_PAGES):
+                next_page = current + 1
+                
+                if next_page >= len(page_offsets):
+                    # Need to create new index
+                    lines, next_off, next_rem = paginate_text(text_file, page_offsets[current], last_remainder)
+                    
+                    # Check for advancement
+                    if next_off <= page_offsets[current]:
+                        # Can't advance, end of book
+                        break
+                    
+                    page_offsets.append(next_off)
+                    page_remainders[next_page] = next_rem
+                    last_remainder = next_rem
+                else:
+                    # Page already indexed, but still need to paginate to get remainder
+                    _, next_off, next_rem = paginate_text(text_file, page_offsets[current], last_remainder)
+                    page_remainders[next_page] = next_rem
+                    last_remainder = next_rem
+                
+                current = next_page
+                gc.collect()
+                
+                if current >= target_page:
+                    break
+            
+            # Ensure we didn't overshoot
+            current = min(current, len(page_offsets) - 1)
+            
+            # Now render and display the final page
+            print(f"DEBUG: Fast-advance complete. Rendering page {current}")
             render_page_and_rotate(current, current_rotated_buffer)
             update_display_fast(current_rotated_buffer)
-            print(f"DEBUG: Page Down to P{current}. Demand-rendered indexed page.")
-            end_of_index_reached = False # Reset flag on successful advance
             
-        elif len(page_offsets) > 0:
-             # Try calc next and render (NEW INDEX PAGE CREATED)
-             
-             # Current state of the page we are trying to advance from
-             current_offset = page_offsets[current]
-             curr_rem = page_remainders.get(current, b"")
-             
-             # First attempt to paginate normally
-             lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
-             
-             print(f"DEBUG: Indexing check P{current}->P{current+1}. Next_off={next_off}, Current_off={current_offset}, Next_rem_len={len(next_rem)}")
-             
-             # Check for Advancement: File offset MUST move OR the remainder MUST change.
-             advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
-             
-             # --- CRITICAL LOOP DETECTION AND FORCED SKIP ---
-             is_loop_stuck = (next_off == current_offset) and (next_rem == curr_rem) and (len(next_rem) > 0)
-             
-             if is_loop_stuck:
-                 print("DEBUG: Infinite loop detected (Next_off=Current_off and Next_rem=Curr_rem). Attempting forced skip.")
-                 
-                 # Force the file pointer past the long line by running pagination with NO remainder.
-                 # This makes `paginate_text` consume the rest of the line starting at current_offset.
-                 lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
-                 
-                 if skip_off > current_offset:
-                     # Successfully advanced the file pointer to the start of the *next* file line.
-                     next_off, next_rem = skip_off, skip_rem
-                     print(f"DEBUG: Forced skip SUCCESS. New index offset: {next_off}")
-                     # The page still needs to display lines (from the new next_off)
-                     lines, next_off, next_rem = paginate_text(text_file, next_off, skip_rem)
-                     advanced = True # Force success for indexing
-                 else:
-                     # Skip failed, likely end of book with a long line.
-                     print("DEBUG: Forced skip failed to advance file pointer.")
-                     advanced = False
-             # ------------------------------------------------
-             
-             # Final check for indexing
-             if lines and advanced:
-                 print(f"DEBUG: INDEX CREATED for P{current+1} at offset {next_off}")
-                 page_offsets.append(next_off)
-                 page_remainders[current+1] = next_rem
-                 current += 1
-                 render_page_and_rotate(current, current_rotated_buffer)
-                 update_display_fast(current_rotated_buffer)
-                 save_index(INDEX_FILE) 
-                 end_of_index_reached = False # SUCCESS: Reset flag
-             else:
-                 print("DEBUG: Page advancement stopped. Indexing condition failed. End of book/indexed region reached.")
-                 # No current++ here. Page does not advance.
-                 end_of_index_reached = True # FAILURE: Set flag to block background pre-render
+            state["current_page"] = current
+            save_index(INDEX_FILE, current)
+            gc.collect()
+            
+            # Background Pre-render next page
+            next_page_ready = False
+            if current + 1 < len(page_offsets):
+                render_page_and_rotate(current + 1, next_rotated_buffer)
+                next_page_ready = True
+            
+        else:  # Short press: normal single page advance
+            if current + 1 < len(page_offsets) and next_page_ready:
+                current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
+                update_display_fast(current_rotated_buffer)
+                current += 1
+                next_page_ready = False
+                print(f"DEBUG: Page Down to P{current}. Used pre-indexed page.")
+                end_of_index_reached = False
+                
+            elif current + 1 < len(page_offsets):
+                current += 1
+                render_page_and_rotate(current, current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+                print(f"DEBUG: Page Down to P{current}. Demand-rendered indexed page.")
+                end_of_index_reached = False
+                
+            elif len(page_offsets) > 0:
+                current_offset = page_offsets[current]
+                curr_rem = page_remainders.get(current, b"")
+                
+                lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                
+                print(f"DEBUG: Indexing check P{current}->P{current+1}. Next_off={next_off}, Current_off={current_offset}, Next_rem_len={len(next_rem)}")
+                
+                advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+                is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
+                
+                if is_loop_stuck:
+                    print("DEBUG: Infinite loop detected. Attempting forced skip.")
+                    lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+                    
+                    if skip_off > current_offset:
+                        next_off, next_rem = skip_off, skip_rem
+                        print(f"DEBUG: Forced skip SUCCESS. New index offset: {next_off}")
+                        lines, next_off, next_rem = paginate_text(text_file, next_off, skip_rem)
+                        advanced = True
+                    else:
+                        print("DEBUG: Forced skip failed to advance file pointer.")
+                        advanced = False
+                
+                if lines and advanced:
+                    print(f"DEBUG: INDEX CREATED for P{current+1} at offset {next_off}")
+                    page_offsets.append(next_off)
+                    page_remainders[current+1] = next_rem
+                    current += 1
+                    render_page_and_rotate(current, current_rotated_buffer)
+                    update_display_fast(current_rotated_buffer)
+                    save_index(INDEX_FILE, current) 
+                    end_of_index_reached = False
+                else:
+                    print("DEBUG: Page advancement stopped. End of book/indexed region reached.")
+                    end_of_index_reached = True
 
-        state["current_page"] = current # <-- UPDATE IN MEMORY ONLY
+            state["current_page"] = current
+            
+            # Background Pre-render
+            next_page_ready = False
+            if current + 1 < len(page_offsets):
+                render_page_and_rotate(current + 1, next_rotated_buffer)
+                next_page_ready = True
+            elif not end_of_index_reached:
+                current_offset = page_offsets[current]
+                curr_rem = page_remainders.get(current, b"")
+                
+                lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                
+                advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+                is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
+                
+                if is_loop_stuck:
+                    lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+                    if skip_off > current_offset:
+                        next_off, next_rem = skip_off, skip_rem
+                        advanced = True
+                    else:
+                        advanced = False
+
+                if lines and advanced:
+                    page_offsets.append(next_off)
+                    page_remainders[current+1] = next_rem
+                    render_page_and_rotate(current + 1, next_rotated_buffer)
+                    next_page_ready = True
+                    save_index(INDEX_FILE, current)
+                else:
+                    end_of_index_reached = True
         
-        # Background Pre-render
-        next_page_ready = False
-        if current + 1 < len(page_offsets):
-            render_page_and_rotate(current + 1, next_rotated_buffer)
-            next_page_ready = True
-        elif not end_of_index_reached: # Only try to generate the next index if we haven't hit the end/loop
-             # Pre-render logic for creating the next page index if one doesn't exist
-             current_offset = page_offsets[current]
-             curr_rem = page_remainders.get(current, b"")
-             
-             lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
-             
-             print(f"DEBUG: Pre-render check P{current}->P{current+1}. Next_off={next_off}, Current_off={current_offset}, Next_rem_len={len(next_rem)}")
-             
-             advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
-             is_loop_stuck = (next_off == current_offset) and (next_rem == curr_rem) and (len(next_rem) > 0)
-             
-             if is_loop_stuck:
-                 print("DEBUG: Pre-render loop detected. Attempting forced skip for index.")
-                 lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
-                 
-                 if skip_off > current_offset:
-                     next_off, next_rem = skip_off, skip_rem
-                     print(f"DEBUG: Pre-render skip SUCCESS. New index offset: {next_off}")
-                     advanced = True 
-                 else:
-                     advanced = False # Skip failed, stop pre-indexing
-
-             if lines and advanced:
-                 print(f"DEBUG: INDEX CREATED for P{current+1} at offset {next_off}")
-                 page_offsets.append(next_off)
-                 page_remainders[current+1] = next_rem
-                 render_page_and_rotate(current + 1, next_rotated_buffer)
-                 next_page_ready = True
-                 save_index(INDEX_FILE)
-             else:
-                 end_of_index_reached = True # Set flag to block future attempts in the main loop
-        
-        led_off() # TURN OFF AT END
-
-        t_start = time.monotonic()
-        while button_pressed(buttons["down"]) and (time.monotonic() - t_start < 0.3): pass
+        led_off()
         time.sleep(0.05)
 
     # PAGE UP
@@ -749,7 +862,7 @@ while True:
             render_page_and_rotate(current, current_rotated_buffer)
             update_display_fast(current_rotated_buffer)
             
-            state["current_page"] = current # <-- UPDATE IN MEMORY ONLY
+            state["current_page"] = current
             print(f"DEBUG: Page Up to P{current}.")
             
             # Reset the 'stuck' flag when moving backward
@@ -762,12 +875,12 @@ while True:
         led_off() # TURN OFF AT END
         time.sleep(0.2)
 
-    # FILE PICKER (Progress save is REQUIRED here)
+    # FILE PICKER
     if button_pressed(buttons["a"]):
-        
+        led_on()
         # --- SAVE PROGRESS BEFORE ENTERING FILE PICKER ---
         print(f"DEBUG: Saving state and index before entering file picker. Current Page: {current}")
-        save_index(INDEX_FILE) 
+        save_index(INDEX_FILE, current)
         state_save(state)
         
         # LED is OFF during interactive file_picker()
@@ -776,37 +889,24 @@ while True:
         if new_book:
             led_on() # TURN ON for slow process of loading/rendering
             
-            # 1. Reload state from disk to ensure 'state' holds the latest saved page for the selected book.
-            state = state_load() 
-            
-            # Get the name of the book that was saved in the state file
-            saved_book = state.get("last_book", "")
-            
             # Set the current book to the one selected
             text_file = new_book
             state["last_book"] = text_file
             
             INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
             
-            # 2. Load the index (offsets) for the selected book.
+            # Load the index (offsets) for the selected book.
             try:
                 os.stat(INDEX_FILE)
-                load_index(INDEX_FILE) 
+                current = load_index(INDEX_FILE)  # Get saved page from index
                 print(f"DEBUG: Index loaded for {text_file}. Total pages indexed: {len(page_offsets)}")
             except OSError:
                 page_offsets = [0]
                 page_remainders = {}
+                current = 0
                 print(f"DEBUG: Index not found for {text_file}. Starting fresh.")
 
-            # 3. Determine starting page
-            if saved_book == text_file:
-                 # The state file tracks this book, so load its saved page
-                current = state.get("current_page", 0)
-            else:
-                # The state file tracks a different book, so start this one at page 0.
-                current = 0
-            
-            # 4. Enforce boundaries and update in-memory state
+            # Enforce boundaries and update in-memory state
             current = min(current, max(0, len(page_offsets)-1))
             state["current_page"] = current
             print(f"DEBUG: Resuming/Starting {text_file} at Page {current}. Offset: {page_offsets[current]}")
@@ -814,11 +914,11 @@ while True:
             # Reset flag
             end_of_index_reached = False 
 
-            # 5. Render current page 
+            # Render current page 
             render_page_and_rotate(current, current_rotated_buffer)
             update_display_fast(current_rotated_buffer)
             
-            # 6. Background Pre-render (Generate next page index if needed)
+            # Background Pre-render (Generate next page index if needed)
             next_page_ready = False
             
             # Check if we need to index the next page
@@ -845,7 +945,6 @@ while True:
                       else:
                           advanced = False # Skip failed, stop pre-indexing
 
-
                  # Advance index if the page produced lines AND advanced content OR left a NEW remainder
                  if lines and advanced: 
                      page_offsets.append(next_off)
@@ -860,15 +959,16 @@ while True:
                  next_page_ready = True
                  print(f"DEBUG: P{current+1} pre-rendered.")
             
-            # 7. Save final state/index (Index may have changed due to pre-render)
-            save_index(INDEX_FILE) 
+            # Save final state/index (Index may have changed due to pre-render)
+            save_index(INDEX_FILE, current) 
+            state_save(state)
             
             led_off() # TURN OFF after loading/rendering
         else:
              # If no book was selected, just redraw the previous content
              update_display_fast(current_rotated_buffer) 
              
-    # INACTIVITY TIMEOUT (Progress save is REQUIRED here)
+    # INACTIVITY TIMEOUT
     if time.monotonic() - last_activity > INACTIVITY_TIMEOUT:
         # Check if we're on USB power
         _, is_charging = get_battery_status()
@@ -878,23 +978,19 @@ while True:
             print("On USB power - staying awake")
             last_activity = time.monotonic()
         else:
-            # On battery: Light sleep with button polling
+            # On battery: Hardware sleep
             led_on()
             
             print(f"DEBUG: Inactivity timeout. Saving state. Current Page: {current}")
             state["current_page"] = current
-            save_index(INDEX_FILE)
+            save_index(INDEX_FILE, current)
             state_save(state)
             time.sleep(0.5)
             led_off()
-            
-            # Turn off e-ink display to save power
-            # (the display itself draws minimal power when not updating)
             
             print("Entering low-power idle. Press any button to wake...")
             
             board.ENABLE_DIO.value = False
             print("ENABLE_DIO set to low - powered down")
 
-
-
+    time.sleep(0.01)
