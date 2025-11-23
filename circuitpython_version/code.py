@@ -2,7 +2,9 @@
 CircuitPython E-book Reader for Badger 2040
 Ported from MicroPython to use uc8151_circuitpython driver
 
-
+FINAL VERSION 2.21 (MULTI-BOOK PROGRESS FIX):
+- FIXED: Book progress now stored per-book in index files
+- Each book remembers its own page position
 """
 import board
 import displayio
@@ -95,8 +97,8 @@ display = UC8151(
     external_font=vga2_8x16, 
     use_framebuf_font=True,  # ENABLED for 5x8 FONT
     font_path="font5x8.bin", # PATH TO SMALLEST FONT
-    speed=4,
-    no_flickering=False,
+    speed=3,
+    no_flickering=True,
     full_update_period=0
 )
 
@@ -210,6 +212,7 @@ def get_storage_status():
 def paginate_text(file_path, start_offset, remainder=b""):
     """
     Reads from the file stream and word-wraps the text into LINES_PER_PAGE lines.
+    Fix 2.3: Separates raw byte tracking from display string cleaning to fix offset bugs.
     """
     print(f"DEBUG: Paginate called. Start_offset={start_offset}, Remainder_len={len(remainder)}")
     try:
@@ -244,54 +247,77 @@ def paginate_text(file_path, start_offset, remainder=b""):
                         break
                     continue
                 
-                # Decode - match MicroPython exactly
+                # Decode RAW (keep this for offset tracking)
                 try:
-                    line_str = line.decode("utf-8", "ignore")
+                    line_str_raw = line.decode("utf-8", "ignore")
                 except:
                     try:
-                        line_str = line.decode("latin-1", "ignore")
+                        line_str_raw = line.decode("latin-1", "ignore")
                     except:
-                        # Last resort: treat as ASCII, skip non-ASCII bytes
-                        line_str = ''.join(chr(b) if b < 128 else '?' for b in line)
+                        line_str_raw = ''.join(chr(b) if b < 128 else '?' for b in line)
                 
-                # Clean unicode
-                line_str = line_str.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
-                           .replace("\u2014", "-").replace("\u2013", "-").replace("…", "...")
+                # Split RAW words
+                words_raw = line_str_raw.split(" ")
                 
-                words = line_str.split(" ")
-                current = ""
-                byte_idx = 0
+                current_clean_text = ""
+                word_count = 0 # Tracks count into words_raw
                 
-                for i, word in enumerate(words):
-                    if not word:
-                        byte_idx += 1
+                for raw_word in words_raw:
+                    # Handle empty words (multiple spaces)
+                    if not raw_word:
+                        word_count += 1
                         continue
-                    
-                    appended = current + " " + word if current else word
+                        
+                    # Clean the word for display checking
+                    word_clean = raw_word.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
+                               .replace("\u2014", "-").replace("\u2013", "-").replace("…", "...")
+
+                    # Check fit with CLEANED word
+                    # Note: We simulate the space that would be added
+                    appended = current_clean_text + " " + word_clean if current_clean_text else word_clean
                     
                     if len(appended) <= MAX_CHARS:
-                        current = appended
-                        byte_idx += len(word.encode("utf-8", "ignore")) + (1 if i < len(words)-1 else 0)
+                        current_clean_text = appended
+                        word_count += 1
                     else:
-                        # Line break
-                        lines.append(current.encode("utf-8", "ignore"))
+                        # Word doesn't fit - break here
+                        lines.append(current_clean_text.encode("utf-8", "ignore"))
                         line_count += 1
                         
                         if line_count >= LINES_PER_PAGE:
+                            # Reconstruct CONSUMED portion using RAW words to get correct byte index
+                            consumed_raw = words_raw[:word_count]
+                            consumed_raw_str = " ".join(consumed_raw)
+                            
+                            # Add the trailing space that existed in the raw line 
+                            # (The space separating the last consumed word from the failing word)
+                            if len(consumed_raw) > 0 and word_count < len(words_raw):
+                                consumed_raw_str += " "
+                                
+                            byte_idx = len(consumed_raw_str.encode("utf-8", "ignore"))
+                            
                             remainder = line_bytes[byte_idx:]
-                            next_offset = pos + byte_idx
+                            
+                            # Robustness: Strip leading spaces from remainder
+                            extra_skip = 0
+                            while remainder.startswith(b' '):
+                                remainder = remainder[1:]
+                                extra_skip += 1
+                                
+                            next_offset = pos + byte_idx + extra_skip
                             break
                         
-                        current = word
-                        byte_idx += len(word.encode("utf-8", "ignore")) + (1 if i < len(words)-1 else 0)
+                        # Start new line with this word
+                        current_clean_text = word_clean
+                        word_count += 1
                 
                 # Break check
                 if next_offset != -1:
                     break
                 
                 # Add final line content
-                if current:
-                    lines.append(current.encode("utf-8", "ignore"))
+                if current_clean_text:
+                    lines.append(current_clean_text.encode("utf-8", "ignore"))
                     line_count += 1
                 
                 if line_count >= LINES_PER_PAGE:
@@ -633,8 +659,8 @@ def file_picker():
 
 # ---------------- MAIN -----------------
 # Re-enable power on boot/wake
-board.ENABLE_DIO.value = True
-time.sleep(0.1)  # Allow power rails to stabilize
+# board.ENABLE_DIO.value = True
+# time.sleep(0.1)  # Allow power rails to stabilize
 
 led_on()
 state = state_load()
