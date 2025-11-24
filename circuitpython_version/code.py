@@ -2,9 +2,9 @@
 CircuitPython E-book Reader for Badger 2040
 Ported from MicroPython to use uc8151_circuitpython driver
 
-FINAL VERSION 2.21 (MULTI-BOOK PROGRESS FIX):
-- FIXED: Book progress now stored per-book in index files
-- Each book remembers its own page position
+FINAL VERSION 2.23 (TIMING DEBUG):
+- Removed paginate debug prints
+- Added detailed timing for page down operations
 """
 import board
 import displayio
@@ -87,6 +87,10 @@ end_of_index_reached = False
 
 # ---------------- DISPLAY -----------------
 spi = board.SPI()
+
+# Store original display settings
+ORIGINAL_SPEED = 4
+ORIGINAL_NO_FLICKERING = False
 display = UC8151(
     spi,
     cs=board.INKY_CS,
@@ -97,8 +101,8 @@ display = UC8151(
     external_font=vga2_8x16, 
     use_framebuf_font=True,  # ENABLED for 5x8 FONT
     font_path="font5x8.bin", # PATH TO SMALLEST FONT
-    speed=3,
-    no_flickering=True,
+    speed=ORIGINAL_SPEED,
+    no_flickering=ORIGINAL_NO_FLICKERING,
     full_update_period=0
 )
 
@@ -209,20 +213,34 @@ def get_storage_status():
 
 # ---------------- TEXT PROCESSING (Memory Optimized) -----------------
 
-def paginate_text(file_path, start_offset, remainder=b""):
+def paginate_text(file_path, start_offset, remainder=b"", debug_label=""):
     """
     Reads from the file stream and word-wraps the text into LINES_PER_PAGE lines.
     Fix 2.3: Separates raw byte tracking from display string cleaning to fix offset bugs.
     """
-    print(f"DEBUG: Paginate called. Start_offset={start_offset}, Remainder_len={len(remainder)}")
+    t_func_start = time.monotonic()
+    if debug_label:
+        print(f"  [{debug_label}] Paginate started")
+    
     try:
+        t1 = time.monotonic()
         with open(file_path, "rb") as f:
             f.seek(start_offset)
+            if debug_label:
+                print(f"  [{debug_label}] File open+seek: {(time.monotonic() - t1)*1000:.1f}ms")
+            
             lines = []
             line_count = 0
             next_offset = -1
             
+            t_loop_total = 0
+            t_readline_total = 0
+            t_decode_total = 0
+            t_wordwrap_total = 0
+            
             while line_count < LINES_PER_PAGE:
+                t_loop_start = time.monotonic()
+                
                 pos = f.tell()
                 
                 if remainder:
@@ -230,7 +248,9 @@ def paginate_text(file_path, start_offset, remainder=b""):
                     f.seek(start_offset + len(remainder))
                     remainder = b""
                 else:
+                    t_read = time.monotonic()
                     line_bytes = f.readline()
+                    t_readline_total += (time.monotonic() - t_read)
                 
                 if not line_bytes:
                     next_offset = f.tell()
@@ -248,6 +268,7 @@ def paginate_text(file_path, start_offset, remainder=b""):
                     continue
                 
                 # Decode RAW (keep this for offset tracking)
+                t_decode = time.monotonic()
                 try:
                     line_str_raw = line.decode("utf-8", "ignore")
                 except:
@@ -255,6 +276,10 @@ def paginate_text(file_path, start_offset, remainder=b""):
                         line_str_raw = line.decode("latin-1", "ignore")
                     except:
                         line_str_raw = ''.join(chr(b) if b < 128 else '?' for b in line)
+                t_decode_total += (time.monotonic() - t_decode)
+                
+                # Word wrapping
+                t_wrap = time.monotonic()
                 
                 # Split RAW words
                 words_raw = line_str_raw.split(" ")
@@ -273,7 +298,6 @@ def paginate_text(file_path, start_offset, remainder=b""):
                                .replace("\u2014", "-").replace("\u2013", "-").replace("…", "...")
 
                     # Check fit with CLEANED word
-                    # Note: We simulate the space that would be added
                     appended = current_clean_text + " " + word_clean if current_clean_text else word_clean
                     
                     if len(appended) <= MAX_CHARS:
@@ -289,8 +313,7 @@ def paginate_text(file_path, start_offset, remainder=b""):
                             consumed_raw = words_raw[:word_count]
                             consumed_raw_str = " ".join(consumed_raw)
                             
-                            # Add the trailing space that existed in the raw line 
-                            # (The space separating the last consumed word from the failing word)
+                            # Add the trailing space
                             if len(consumed_raw) > 0 and word_count < len(words_raw):
                                 consumed_raw_str += " "
                                 
@@ -298,7 +321,7 @@ def paginate_text(file_path, start_offset, remainder=b""):
                             
                             remainder = line_bytes[byte_idx:]
                             
-                            # Robustness: Strip leading spaces from remainder
+                            # Strip leading spaces from remainder
                             extra_skip = 0
                             while remainder.startswith(b' '):
                                 remainder = remainder[1:]
@@ -323,12 +346,26 @@ def paginate_text(file_path, start_offset, remainder=b""):
                 if line_count >= LINES_PER_PAGE:
                     next_offset = f.tell()
                     break
+                
+                t_wordwrap_total += (time.monotonic() - t_wrap)
+                t_loop_total += (time.monotonic() - t_loop_start)
             
             if next_offset == -1:
                 next_offset = f.tell()
             
-            print(f"DEBUG: Paginate finished. next_offset={next_offset}, final_rem_len={len(remainder)}")
+            if debug_label:
+                print(f"  [{debug_label}] Paginate breakdown:")
+                print(f"    - File readline: {t_readline_total*1000:.1f}ms")
+                print(f"    - Decode: {t_decode_total*1000:.1f}ms")
+                print(f"    - Word wrap: {t_wordwrap_total*1000:.1f}ms")
+                print(f"    - Loop overhead: {(t_loop_total - t_wordwrap_total)*1000:.1f}ms")
+            
+            t1 = time.monotonic()
             gc.collect()
+            if debug_label:
+                print(f"  [{debug_label}] GC: {(time.monotonic() - t1)*1000:.1f}ms")
+                print(f"  [{debug_label}] Paginate TOTAL: {(time.monotonic() - t_func_start)*1000:.1f}ms")
+            
             return lines, next_offset, remainder
             
     except Exception as e:
@@ -339,19 +376,29 @@ def paginate_text(file_path, start_offset, remainder=b""):
         return [], start_offset, b""
 
 # ---------------- RENDERING CORE -----------------
-def render_page_and_rotate(page_num, target_rotated_buffer):
+def render_page_and_rotate(page_num, target_rotated_buffer, debug_label=""):
     """
     1. Renders text, battery status, and progress bar to raw_working_buffer (Landscape)
     2. Rotates it into target_rotated_buffer (Portrait)
     """
+    t_func_start = time.monotonic()
+    if debug_label:
+        print(f"  [{debug_label}] Render started")
+    
     # Clear raw buffer
+    t1 = time.monotonic()
     for i in range(len(raw_working_buffer)):
         raw_working_buffer[i] = 0
+    if debug_label:
+        print(f"  [{debug_label}] Buffer clear: {(time.monotonic() - t1)*1000:.1f}ms")
         
     # Setup temp framebuffer
+    t1 = time.monotonic()
     temp_fb = adafruit_framebuf.FrameBuffer(
         raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
     )
+    if debug_label:
+        print(f"  [{debug_label}] Framebuffer create: {(time.monotonic() - t1)*1000:.1f}ms")
     
     # Swap display context for text rendering
     old_fb = display.fb
@@ -362,26 +409,59 @@ def render_page_and_rotate(page_num, target_rotated_buffer):
     
     try:
         # Get Text
+        t1 = time.monotonic()
         remainder = page_remainders.get(page_num, b"")
-        lines, _, _ = paginate_text(text_file, page_offsets[page_num], remainder) 
+        lines, _, _ = paginate_text(text_file, page_offsets[page_num], remainder, debug_label=debug_label if debug_label else "")
+        if debug_label:
+            print(f"  [{debug_label}] Paginate call: {(time.monotonic() - t1)*1000:.1f}ms")
         
+        t1 = time.monotonic()
         y = TEXT_PADDING
+        total_decode_time = 0
+        total_text_time = 0
+        line_count = 0
+        
         for line in lines:
             if line:
                 try:
+                    t_decode = time.monotonic()
                     # Decode bytes to string for display
                     text = line.decode("utf-8", "replace")
                     # Clean up unicode quotes
                     text = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
                                .replace("\u2014", "-").replace("\u2013", "-")
+                    t_after_decode = time.monotonic()
+                    
                     # Draw using vga2_8x16 (the default external font)
                     display.text(text, TEXT_PADDING, y, 1)
+                    t_after_text = time.monotonic()
+                    
+                    decode_time = (t_after_decode - t_decode) * 1000
+                    text_time = (t_after_text - t_after_decode) * 1000
+                    total_decode_time += decode_time
+                    total_text_time += text_time
+                    line_count += 1
+                    
+                    if debug_label:
+                        print(f"    Line {line_count} ({len(text)} chars): decode={decode_time:.1f}ms, render={text_time:.1f}ms")
                 except:
                     pass
             # Increment Y even if line is empty (creates blank line)
             y += LINE_HEIGHT
+        
+        if debug_label:
+            print(f"  [{debug_label}] Text rendering totals:")
+            print(f"    Decode+clean: {total_decode_time:.1f}ms")
+            print(f"    display.text(): {total_text_time:.1f}ms")
+            print(f"    Lines rendered: {line_count}")
+            if line_count > 0:
+                print(f"    Avg per line: {total_text_time/line_count:.1f}ms")
+        
+        if debug_label:
+            print(f"  [{debug_label}] Text rendering: {(time.monotonic() - t1)*1000:.1f}ms")
             
         # ----------------- Battery Indicator (USING 5x8 FONT) -----------------
+        t1 = time.monotonic()
         pct, charging = get_battery_status()
         
         if charging:
@@ -397,9 +477,12 @@ def render_page_and_rotate(page_num, target_rotated_buffer):
             
             # Draw using the adafruit_framebuf's 5x8 font
             temp_fb.text(status_text, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
+        if debug_label:
+            print(f"  [{debug_label}] Battery indicator: {(time.monotonic() - t1)*1000:.1f}ms")
         # ----------------------------------------------------------------------
         
         # ----------------- Progress Bar (FIXED FILE POSITION IMPLEMENTATION) ------------------
+        t1 = time.monotonic()
         try:
             current_offset = page_offsets[page_num] 
             file_stats = os.stat(text_file)
@@ -418,25 +501,43 @@ def render_page_and_rotate(page_num, target_rotated_buffer):
         except Exception as e:
             # Handle potential file errors during stat or index lookup
             print("Progress bar error:", e)
-            pass 
+            pass
+        if debug_label:
+            print(f"  [{debug_label}] Progress bar: {(time.monotonic() - t1)*1000:.1f}ms")
         # ----------------------------------------------------------------------
             
     finally:
         display.fb = old_fb
         display.raw_fb = old_raw_fb
+        t1 = time.monotonic()
         gc.collect() # Force garbage collection after framebuffer/text objects are finished
+        if debug_label:
+            print(f"  [{debug_label}] GC: {(time.monotonic() - t1)*1000:.1f}ms")
 
     # ROTATION STEP:
+    t1 = time.monotonic()
     rotated_data = display._rotate_framebuffer(raw_working_buffer)
+    if debug_label:
+        print(f"  [{debug_label}] Rotation: {(time.monotonic() - t1)*1000:.1f}ms")
+    
+    t1 = time.monotonic()
     for i in range(len(target_rotated_buffer)):
         target_rotated_buffer[i] = rotated_data[i]
+    if debug_label:
+        print(f"  [{debug_label}] Buffer copy: {(time.monotonic() - t1)*1000:.1f}ms")
+        print(f"  [{debug_label}] Render TOTAL: {(time.monotonic() - t_func_start)*1000:.1f}ms")
 
-def update_display_fast(rotated_buffer):
+def update_display_fast(rotated_buffer, blocking=True):
     """Sends an already rotated buffer to the display."""
     old_rot = display.rotation
     display.rotation = 0 
-    display.update(blocking=True, fb=rotated_buffer)
+    result = display.update(blocking=blocking, fb=rotated_buffer)
     display.rotation = old_rot
+    return result
+
+def wait_for_display():
+    """Wait for display to finish updating."""
+    display.wait_ready()
 
 # ---------------- INDEX STORAGE -----------------
 def save_index(file_path, current_page=0):
@@ -601,7 +702,6 @@ def file_picker():
         
         # Button handling - just swap buffers!
         if button_pressed(buttons["down"]):
-            print(f"[PICKER] DOWN pressed")
             t_start = time.monotonic()
             
             selected = (selected + 1) % len(books)
@@ -618,12 +718,10 @@ def file_picker():
                     display.rotation = 0
                     display.update(fb=selection_buffers[sel_index_on_page])
                     display.rotation = old_rot
-                    print(f"[PICKER] Display update: {(time.monotonic() - t_start)*1000:.1f}ms")
             
             time.sleep(0.15)
             
         elif button_pressed(buttons["up"]):
-            print(f"[PICKER] UP pressed")
             t_start = time.monotonic()
             
             selected = (selected - 1) % len(books)
@@ -640,7 +738,6 @@ def file_picker():
                     display.rotation = 0
                     display.update(fb=selection_buffers[sel_index_on_page])
                     display.rotation = old_rot
-                    print(f"[PICKER] Display update: {(time.monotonic() - t_start)*1000:.1f}ms")
             
             time.sleep(0.15)
             
@@ -728,16 +825,23 @@ while True:
         
     # PAGE DOWN
     if button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
+        t_operation_start = time.monotonic()
+        print(f"\n[DOWN] Button pressed at {t_operation_start:.3f}")
+        
         # Detect long press
+        t1 = time.monotonic()
         press_start = time.monotonic()
         while button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
             time.sleep(0.05)
         press_duration = time.monotonic() - press_start
+        print(f"[DOWN] Press detection: {(time.monotonic() - t1)*1000:.1f}ms (duration: {press_duration:.2f}s)")
         
-        led_on() # IMMEDIATE FEEDBACK
+        t1 = time.monotonic()
+        # led_on() # IMMEDIATE FEEDBACK
+        print(f"[DOWN] LED on: {(time.monotonic() - t1)*1000:.1f}ms")
         
         if press_duration > 0.7:  # Long press: 50-page fast advance
-            print("DEBUG: Long press detected - advancing 50 pages")
+            print("[DOWN] Long press detected - fast advance mode")
             
             FAST_ADVANCE_PAGES = 50
             target_page = current + FAST_ADVANCE_PAGES
@@ -745,6 +849,7 @@ while True:
             # Track remainder through the loop (CRITICAL!)
             last_remainder = page_remainders.get(current, b"")
             
+            t1 = time.monotonic()
             # Fast-forward through pages without rendering
             for _ in range(FAST_ADVANCE_PAGES):
                 next_page = current + 1
@@ -775,93 +880,246 @@ while True:
             
             # Ensure we didn't overshoot
             current = min(current, len(page_offsets) - 1)
+            print(f"[DOWN] Fast advance loop: {(time.monotonic() - t1)*1000:.1f}ms")
             
             # Now render and display the final page
-            print(f"DEBUG: Fast-advance complete. Rendering page {current}")
+            t1 = time.monotonic()
             render_page_and_rotate(current, current_rotated_buffer)
-            update_display_fast(current_rotated_buffer)
+            print(f"[DOWN] Render: {(time.monotonic() - t1)*1000:.1f}ms")
             
+            t1 = time.monotonic()
+            update_display_fast(current_rotated_buffer)
+            print(f"[DOWN] Display update: {(time.monotonic() - t1)*1000:.1f}ms")
+            
+            t1 = time.monotonic()
             state["current_page"] = current
-            save_index(INDEX_FILE, current)
             gc.collect()
+            print(f"[DOWN] Save index + GC: {(time.monotonic() - t1)*1000:.1f}ms")
             
             # Background Pre-render next page
             next_page_ready = False
             if current + 1 < len(page_offsets):
-                render_page_and_rotate(current + 1, next_rotated_buffer)
+                t1 = time.monotonic()
+                render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-PreRender")
                 next_page_ready = True
+                print(f"[DOWN] Background pre-render: {(time.monotonic() - t1)*1000:.1f}ms")
             
         else:  # Short press: normal single page advance
             if current + 1 < len(page_offsets) and next_page_ready:
+                print(f"[DOWN] Using pre-rendered page {current+1}")
+                t1 = time.monotonic()
                 current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
-                update_display_fast(current_rotated_buffer)
-                current += 1
-                next_page_ready = False
-                print(f"DEBUG: Page Down to P{current}. Used pre-indexed page.")
-                end_of_index_reached = False
+                print(f"[DOWN] Buffer swap: {(time.monotonic() - t1)*1000:.1f}ms")
+                
+                # NON-BLOCKING update - returns immediately!
+                t1 = time.monotonic()
+                if update_display_fast(current_rotated_buffer, blocking=False):
+                    print(f"[DOWN] Display update (non-blocking start): {(time.monotonic() - t1)*1000:.1f}ms")
+                    
+                    current += 1
+                    next_page_ready = False
+                    end_of_index_reached = False
+                    
+                    # Background Pre-render WHILE display is updating
+                    t1 = time.monotonic()
+                    t_bg_start = time.monotonic()
+                    if current + 1 < len(page_offsets):
+                        render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-Indexed")
+                        next_page_ready = True
+                        print(f"[DOWN] Background pre-render (during display): {(time.monotonic() - t1)*1000:.1f}ms")
+                    elif not end_of_index_reached:
+                        current_offset = page_offsets[current]
+                        curr_rem = page_remainders.get(current, b"")
+                        
+                        t_pag = time.monotonic()
+                        lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem, debug_label="BG-Index1")
+                        print(f"  [BG] First paginate: {(time.monotonic() - t_pag)*1000:.1f}ms")
+                        
+                        advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+                        is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
+                        
+                        if is_loop_stuck:
+                            lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"", debug_label="BG-Skip")
+                            if skip_off > current_offset:
+                                next_off, next_rem = skip_off, skip_rem
+                                advanced = True
+                            else:
+                                advanced = False
+
+                        if lines and advanced:
+                            page_offsets.append(next_off)
+                            page_remainders[current+1] = next_rem
+                            
+                            t_render = time.monotonic()
+                            render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-NewIndex")
+                            print(f"  [BG] Render: {(time.monotonic() - t_render)*1000:.1f}ms")
+                            
+                            next_page_ready = True
+                            print(f"[DOWN] Background index creation + pre-render (during display): {(time.monotonic() - t1)*1000:.1f}ms")
+                        else:
+                            end_of_index_reached = True
+                    
+                    # Wait for display to finish using wait_ready()
+                    t1 = time.monotonic()
+                    wait_for_display()
+                    print(f"[DOWN] Wait for display complete: {(time.monotonic() - t1)*1000:.1f}ms")
+                else:
+                    print("[DOWN] Display busy! Falling back to blocking mode")
+                    update_display_fast(current_rotated_buffer, blocking=True)
+                    current += 1
+                    next_page_ready = False
+                    end_of_index_reached = False
                 
             elif current + 1 < len(page_offsets):
+                print(f"[DOWN] Demand-rendering indexed page {current+1}")
                 current += 1
+                
+                t1 = time.monotonic()
                 render_page_and_rotate(current, current_rotated_buffer)
-                update_display_fast(current_rotated_buffer)
-                print(f"DEBUG: Page Down to P{current}. Demand-rendered indexed page.")
-                end_of_index_reached = False
+                print(f"[DOWN] Render: {(time.monotonic() - t1)*1000:.1f}ms")
+                
+                # NON-BLOCKING update
+                t1 = time.monotonic()
+                if update_display_fast(current_rotated_buffer, blocking=False):
+                    print(f"[DOWN] Display update (non-blocking start): {(time.monotonic() - t1)*1000:.1f}ms")
+                    
+                    end_of_index_reached = False
+                    
+                    # Background Pre-render WHILE display is updating
+                    t1 = time.monotonic()
+                    if current + 1 < len(page_offsets):
+                        render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-Indexed")
+                        next_page_ready = True
+                        print(f"[DOWN] Background pre-render (during display): {(time.monotonic() - t1)*1000:.1f}ms")
+                    elif not end_of_index_reached:
+                        current_offset = page_offsets[current]
+                        curr_rem = page_remainders.get(current, b"")
+                        
+                        lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem, debug_label="BG-Index1")
+                        
+                        advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+                        is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
+                        
+                        if is_loop_stuck:
+                            lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+                            if skip_off > current_offset:
+                                next_off, next_rem = skip_off, skip_rem
+                                advanced = True
+                            else:
+                                advanced = False
+
+                        if lines and advanced:
+                            page_offsets.append(next_off)
+                            page_remainders[current+1] = next_rem
+                            render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-NewIndex")
+                            next_page_ready = True
+                        else:
+                            end_of_index_reached = True
+                    
+                    # Wait for display
+                    wait_for_display()
+                else:
+                    print("[DOWN] Display busy! Using blocking mode")
                 
             elif len(page_offsets) > 0:
+                print(f"[DOWN] Creating new index for page {current+1}")
                 current_offset = page_offsets[current]
                 curr_rem = page_remainders.get(current, b"")
                 
+                t1 = time.monotonic()
                 lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
-                
-                print(f"DEBUG: Indexing check P{current}->P{current+1}. Next_off={next_off}, Current_off={current_offset}, Next_rem_len={len(next_rem)}")
+                print(f"[DOWN] Paginate: {(time.monotonic() - t1)*1000:.1f}ms")
                 
                 advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
                 is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
                 
                 if is_loop_stuck:
-                    print("DEBUG: Infinite loop detected. Attempting forced skip.")
+                    print("[DOWN] Loop detected - forced skip")
                     lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
                     
                     if skip_off > current_offset:
                         next_off, next_rem = skip_off, skip_rem
-                        print(f"DEBUG: Forced skip SUCCESS. New index offset: {next_off}")
                         lines, next_off, next_rem = paginate_text(text_file, next_off, skip_rem)
                         advanced = True
                     else:
-                        print("DEBUG: Forced skip failed to advance file pointer.")
                         advanced = False
                 
                 if lines and advanced:
-                    print(f"DEBUG: INDEX CREATED for P{current+1} at offset {next_off}")
                     page_offsets.append(next_off)
                     page_remainders[current+1] = next_rem
                     current += 1
+                    
+                    t1 = time.monotonic()
                     render_page_and_rotate(current, current_rotated_buffer)
-                    update_display_fast(current_rotated_buffer)
-                    save_index(INDEX_FILE, current) 
-                    end_of_index_reached = False
+                    print(f"[DOWN] Render: {(time.monotonic() - t1)*1000:.1f}ms")
+                    
+                    # NON-BLOCKING update
+                    t1 = time.monotonic()
+                    if update_display_fast(current_rotated_buffer, blocking=False):
+                        print(f"[DOWN] Display update (non-blocking start): {(time.monotonic() - t1)*1000:.1f}ms")
+                        
+                        end_of_index_reached = False
+                        
+                        # Background work while display updates
+                        t1 = time.monotonic()
+                        if current + 1 < len(page_offsets):
+                            render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-Indexed")
+                            next_page_ready = True
+                        elif not end_of_index_reached:
+                            current_offset = page_offsets[current]
+                            curr_rem = page_remainders.get(current, b"")
+                            
+                            lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem, debug_label="BG-Index1")
+                            
+                            advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+                            is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
+                            
+                            if is_loop_stuck:
+                                lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+                                if skip_off > current_offset:
+                                    next_off, next_rem = skip_off, skip_rem
+                                    advanced = True
+                                else:
+                                    advanced = False
+
+                            if lines and advanced:
+                                page_offsets.append(next_off)
+                                page_remainders[current+1] = next_rem
+                                render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-NewIndex")
+                                next_page_ready = True
+                            else:
+                                end_of_index_reached = True
+                        print(f"[DOWN] Background work (during display): {(time.monotonic() - t1)*1000:.1f}ms")
+                        
+                        # Wait for display
+                        wait_for_display()
+                    else:
+                        print("[DOWN] Display busy! Using blocking mode")
                 else:
-                    print("DEBUG: Page advancement stopped. End of book/indexed region reached.")
+                    print("[DOWN] End of book reached")
                     end_of_index_reached = True
 
             state["current_page"] = current
             
-            # Background Pre-render
+            t1 = time.monotonic()
             next_page_ready = False
             if current + 1 < len(page_offsets):
-                render_page_and_rotate(current + 1, next_rotated_buffer)
+                render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-Indexed")
                 next_page_ready = True
+                print(f"[DOWN] Background pre-render: {(time.monotonic() - t1)*1000:.1f}ms")
             elif not end_of_index_reached:
                 current_offset = page_offsets[current]
                 curr_rem = page_remainders.get(current, b"")
                 
-                lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                t_pag = time.monotonic()
+                lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem, debug_label="BG-Index1")
+                print(f"  [BG] First paginate: {(time.monotonic() - t_pag)*1000:.1f}ms")
                 
                 advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
                 is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
                 
                 if is_loop_stuck:
-                    lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+                    lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"", debug_label="BG-Skip")
                     if skip_off > current_offset:
                         next_off, next_rem = skip_off, skip_rem
                         advanced = True
@@ -871,14 +1129,24 @@ while True:
                 if lines and advanced:
                     page_offsets.append(next_off)
                     page_remainders[current+1] = next_rem
-                    render_page_and_rotate(current + 1, next_rotated_buffer)
+                    
+                    t_render = time.monotonic()
+                    render_page_and_rotate(current + 1, next_rotated_buffer, debug_label="BG-NewIndex")
+                    print(f"  [BG] Render: {(time.monotonic() - t_render)*1000:.1f}ms")
+                    
                     next_page_ready = True
-                    save_index(INDEX_FILE, current)
+                    
+                    t_save = time.monotonic()
+                    print(f"  [BG] Save index: {(time.monotonic() - t_save)*1000:.1f}ms")
+                    print(f"[DOWN] Background index creation + pre-render: {(time.monotonic() - t1)*1000:.1f}ms")
                 else:
                     end_of_index_reached = True
         
+        led_on()
+        t1 = time.monotonic()
         led_off()
-        time.sleep(0.05)
+        print(f"[DOWN] LED off: {(time.monotonic() - t1)*1000:.1f}ms")
+        print(f"[DOWN] TOTAL operation time: {(time.monotonic() - t_operation_start)*1000:.1f}ms\n")
 
     # PAGE UP
     if button_pressed(buttons["up"]):
@@ -889,7 +1157,6 @@ while True:
             update_display_fast(current_rotated_buffer)
             
             state["current_page"] = current
-            print(f"DEBUG: Page Up to P{current}.")
             
             # Reset the 'stuck' flag when moving backward
             end_of_index_reached = False
@@ -899,13 +1166,11 @@ while True:
                 render_page_and_rotate(current + 1, next_rotated_buffer)
                 next_page_ready = True
         led_off() # TURN OFF AT END
-        time.sleep(0.2)
 
     # FILE PICKER
     if button_pressed(buttons["a"]):
         led_on()
         # --- SAVE PROGRESS BEFORE ENTERING FILE PICKER ---
-        print(f"DEBUG: Saving state and index before entering file picker. Current Page: {current}")
         save_index(INDEX_FILE, current)
         state_save(state)
         
@@ -925,17 +1190,14 @@ while True:
             try:
                 os.stat(INDEX_FILE)
                 current = load_index(INDEX_FILE)  # Get saved page from index
-                print(f"DEBUG: Index loaded for {text_file}. Total pages indexed: {len(page_offsets)}")
             except OSError:
                 page_offsets = [0]
                 page_remainders = {}
                 current = 0
-                print(f"DEBUG: Index not found for {text_file}. Starting fresh.")
 
             # Enforce boundaries and update in-memory state
             current = min(current, max(0, len(page_offsets)-1))
             state["current_page"] = current
-            print(f"DEBUG: Resuming/Starting {text_file} at Page {current}. Offset: {page_offsets[current]}")
             
             # Reset flag
             end_of_index_reached = False 
@@ -955,18 +1217,14 @@ while True:
                  
                  lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
                  
-                 print(f"DEBUG: Initial pre-render check P{current}->P{current+1}. Next_off={next_off}, Current_off={current_offset}, Next_rem_len={len(next_rem)}")
-                 
                  advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
                  is_loop_stuck = (next_off == current_offset) and (next_rem == curr_rem) and (len(next_rem) > 0)
                  
                  if is_loop_stuck:
-                      print("DEBUG: Initial pre-render loop detected. Attempting forced skip for index.")
                       lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
                  
                       if skip_off > current_offset:
                           next_off, next_rem = skip_off, skip_rem
-                          print(f"DEBUG: Initial pre-render skip SUCCESS. New index offset: {next_off}")
                           advanced = True 
                       else:
                           advanced = False # Skip failed, stop pre-indexing
@@ -975,7 +1233,6 @@ while True:
                  if lines and advanced: 
                      page_offsets.append(next_off)
                      page_remainders[current+1] = next_rem
-                     print(f"DEBUG: Initial INDEX CREATED for P{current+1} at offset {next_off}")
                  else:
                      end_of_index_reached = True
 
@@ -983,7 +1240,6 @@ while True:
                  # Now it's safe to pre-render the next page
                  render_page_and_rotate(current + 1, next_rotated_buffer)
                  next_page_ready = True
-                 print(f"DEBUG: P{current+1} pre-rendered.")
             
             # Save final state/index (Index may have changed due to pre-render)
             save_index(INDEX_FILE, current) 
@@ -992,7 +1248,29 @@ while True:
             led_off() # TURN OFF after loading/rendering
         else:
              # If no book was selected, just redraw the previous content
-             update_display_fast(current_rotated_buffer) 
+             update_display_fast(current_rotated_buffer)
+    
+    # BUTTON B - FULL DISPLAY REFRESH
+    if button_pressed(buttons["b"]):
+        led_on()
+        
+        # Wait for button release
+        while button_pressed(buttons["b"]):
+            time.sleep(0.05)
+        
+        # Change to full refresh settings
+        display.speed = 3
+        display.no_flickering = False
+        
+        # Re-render and update with full refresh
+        render_page_and_rotate(current, current_rotated_buffer)
+        update_display_fast(current_rotated_buffer)
+        
+        # Revert to original settings
+        display.speed = ORIGINAL_SPEED
+        display.no_flickering = ORIGINAL_NO_FLICKERING
+        
+        led_off()
              
     # INACTIVITY TIMEOUT
     if time.monotonic() - last_activity > INACTIVITY_TIMEOUT:
@@ -1001,22 +1279,17 @@ while True:
         
         if is_charging:
             # On USB: Don't sleep at all, just reset timer
-            print("On USB power - staying awake")
             last_activity = time.monotonic()
         else:
             # On battery: Hardware sleep
             led_on()
             
-            print(f"DEBUG: Inactivity timeout. Saving state. Current Page: {current}")
             state["current_page"] = current
             save_index(INDEX_FILE, current)
             state_save(state)
             time.sleep(0.5)
             led_off()
             
-            print("Entering low-power idle. Press any button to wake...")
-            
             board.ENABLE_DIO.value = False
-            print("ENABLE_DIO set to low - powered down")
 
     time.sleep(0.01)
