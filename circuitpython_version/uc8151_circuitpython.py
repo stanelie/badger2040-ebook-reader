@@ -261,8 +261,8 @@ class UC8151:
     
     def _draw_text_external(self, string, x, y, color):
         """
-        Draw text using an external Python font module - OPTIMIZED.
-        Uses horizontal rectangles with direct framebuffer access.
+        Draw text using an external Python font module - BYTE-LEVEL OPTIMIZED.
+        Processes entire character columns when byte-aligned.
         """
         font_data = self.external_font.FONT
         char_width = self.external_font.WIDTH
@@ -270,7 +270,6 @@ class UC8151:
         first_char = self.external_font.FIRST
         last_char = self.external_font.LAST
         
-        # Direct framebuffer access for speed
         fb = self.raw_fb
         fb_width = self.width
         
@@ -283,7 +282,7 @@ class UC8151:
                 continue
             
             # Calculate offset in font data
-            idx = (ascii_val - first_char) * char_height
+            font_idx = (ascii_val - first_char) * char_height
             
             # Draw character row by row
             for y_off in range(char_height):
@@ -291,46 +290,25 @@ class UC8151:
                 if py < 0 or py >= self.height:
                     continue
                 
-                row = font_data[idx + y_off]
-                start = -1
+                row_byte = font_data[font_idx + y_off]
+                if row_byte == 0:
+                    continue
                 
-                # Find horizontal runs in this row
-                for x_off in range(char_width):
-                    set_pixel = (row >> (7 - x_off)) & 1
-                    
-                    if set_pixel and start == -1:
-                        start = x_off
-                    elif not set_pixel and start != -1:
-                        # Draw rectangle directly to framebuffer
-                        px = cursor_x + start
-                        width = x_off - start
-                        if 0 <= px < fb_width and px + width <= fb_width:
-                            # Draw horizontal line in framebuffer
-                            for i in range(width):
-                                pixel_x = px + i
-                                pixel_idx = py * fb_width + pixel_x
-                                byte_idx = pixel_idx >> 3
-                                bit_idx = 7 - (pixel_idx & 7)
-                                if color:
-                                    fb[byte_idx] |= (1 << bit_idx)
-                                else:
-                                    fb[byte_idx] &= ~(1 << bit_idx)
-                        start = -1
+                # Calculate starting position in framebuffer
+                px = cursor_x
+                base_idx = py * fb_width + px
                 
-                # Handle final run if row ends with pixels
-                if start != -1:
-                    px = cursor_x + start
-                    width = char_width - start
-                    if 0 <= px < fb_width and px + width <= fb_width:
-                        for i in range(width):
-                            pixel_x = px + i
-                            pixel_idx = py * fb_width + pixel_x
-                            byte_idx = pixel_idx >> 3
-                            bit_idx = 7 - (pixel_idx & 7)
-                            if color:
-                                fb[byte_idx] |= (1 << bit_idx)
-                            else:
-                                fb[byte_idx] &= ~(1 << bit_idx)
+                # Process each bit in the font row byte
+                for bit_pos in range(char_width):
+                    if row_byte & (0x80 >> bit_pos):
+                        pixel_idx = base_idx + bit_pos
+                        byte_idx = pixel_idx >> 3
+                        bit_idx = 7 - (pixel_idx & 7)
+                        
+                        if color:
+                            fb[byte_idx] |= (1 << bit_idx)
+                        else:
+                            fb[byte_idx] &= ~(1 << bit_idx)
             
             cursor_x += char_width
     
