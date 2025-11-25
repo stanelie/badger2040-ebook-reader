@@ -19,6 +19,10 @@ import adafruit_framebuf
 import analogio   
 import microcontroller
 import alarm
+import pwmio
+
+# LED Configuration
+LED_DUTY_CYCLE = 40  # LED brightness when "on" (0-100%)
 
 displayio.release_displays()
 
@@ -108,6 +112,41 @@ display = UC8151(
 
 display.enable_quick_updates(True)
 
+# ---------------- LED -----------------
+led = None
+led_is_pwm = False
+
+# Try PWM first
+try:
+    led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
+    led_is_pwm = True
+except:
+    # Fall back to digital IO
+    try:
+        led = digitalio.DigitalInOut(board.USER_LED)
+        led.direction = digitalio.Direction.OUTPUT
+        led.value = False
+        led_is_pwm = False
+    except:
+        pass
+
+def led_on():
+    if led:
+        if led_is_pwm:
+            # Convert percentage to 16-bit duty cycle value (0-65535)
+            duty_value = int((LED_DUTY_CYCLE / 100.0) * 65535)
+            led.duty_cycle = duty_value
+        else:
+            # For digital LED, just turn it on (software PWM not practical in main loop)
+            led.value = True
+
+def led_off():
+    if led:
+        if led_is_pwm:
+            led.duty_cycle = 0
+        else:
+            led.value = False
+
 # --- BUFFERS ---
 raw_working_buffer = bytearray(display.width * display.height // 8)
 current_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
@@ -126,26 +165,6 @@ for name, pin in [("up", board.SW_UP), ("down", board.SW_DOWN),
 
 def button_pressed(btn):
     return btn.value
-
-# ---------------- LED -----------------
-led = None
-try:
-    led = digitalio.DigitalInOut(microcontroller.pin.GPIO25)
-    led.direction = digitalio.Direction.OUTPUT
-    led.value = False
-except:
-    try:
-        led = digitalio.DigitalInOut(board.LED)
-        led.direction = digitalio.Direction.OUTPUT
-        led.value = False
-    except:
-        pass
-
-def led_on():
-    if led: led.value = True
-
-def led_off():
-    if led: led.value = False
 
 # ---------------- BATTERY SETUP -----------------
 try:
@@ -529,6 +548,7 @@ def file_picker():
                 display.rotation = 0
                 display.update(fb=selection_buffers[sel_index_on_page])
                 display.rotation = old_rot
+            led_off()
         
         if button_pressed(buttons["down"]):
             selected = (selected + 1) % len(books)
@@ -635,6 +655,7 @@ while True:
         
     # PAGE DOWN
     if button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
+        led_on()
         press_start = time.monotonic()
         while button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
             time.sleep(0.05)
@@ -827,35 +848,35 @@ while True:
 
             state["current_page"] = current
             
-            next_page_ready = False
-            if current + 1 < len(page_offsets):
-                render_page_and_rotate(current + 1, next_rotated_buffer)
-                next_page_ready = True
-            elif not end_of_index_reached:
-                current_offset = page_offsets[current]
-                curr_rem = page_remainders.get(current, b"")
-                
-                lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
-                
-                advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
-                is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
-                
-                if is_loop_stuck:
-                    lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
-                    if skip_off > current_offset:
-                        next_off, next_rem = skip_off, skip_rem
-                        advanced = True
-                    else:
-                        advanced = False
-
-                if lines and advanced:
-                    page_offsets.append(next_off)
-                    page_remainders[current+1] = next_rem
-                    render_page_and_rotate(current + 1, next_rotated_buffer)
-                    next_page_ready = True
-                else:
-                    end_of_index_reached = True
-        led_on()
+#             next_page_ready = False
+#             if current + 1 < len(page_offsets):
+#                 render_page_and_rotate(current + 1, next_rotated_buffer)
+#                 next_page_ready = True
+#             elif not end_of_index_reached:
+#                 current_offset = page_offsets[current]
+#                 curr_rem = page_remainders.get(current, b"")
+#                 
+#                 lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+#                 
+#                 advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+#                 is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
+#                 
+#                 if is_loop_stuck:
+#                     lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+#                     if skip_off > current_offset:
+#                         next_off, next_rem = skip_off, skip_rem
+#                         advanced = True
+#                     else:
+#                         advanced = False
+# 
+#                 if lines and advanced:
+#                     page_offsets.append(next_off)
+#                     page_remainders[current+1] = next_rem
+#                     render_page_and_rotate(current + 1, next_rotated_buffer)
+#                     next_page_ready = True
+#                 else:
+#                     end_of_index_reached = True
+        
         time.sleep(0.003)
         led_off()
 
@@ -878,6 +899,7 @@ while True:
     # FILE PICKER
     if button_pressed(buttons["a"]):
         led_on()
+        state["current_page"] = current
         save_index(INDEX_FILE, current)
         state_save(state)
         
@@ -943,23 +965,19 @@ while True:
             led_off()
         else:
              update_display_fast(current_rotated_buffer)
+             led_off()
     
-    # BUTTON B - FULL DISPLAY REFRESH
+    # BUTTON B - SCREEN CLEAN (X-filled -> Empty -> Restore)
     if button_pressed(buttons["b"]):
         led_on()
-        
         while button_pressed(buttons["b"]):
             time.sleep(0.05)
         
-        display.speed = 3
-        display.no_flickering = False
-        
-        render_page_and_rotate(current, current_rotated_buffer)
-        update_display_fast(current_rotated_buffer)
-        
-        display.speed = ORIGINAL_SPEED
-        display.no_flickering = ORIGINAL_NO_FLICKERING
-        
+        display.fb.fill(0)
+        display.update(blocking=True)
+        display.fb.fill(1)
+        display.update(blocking=True)
+        update_display_fast(current_rotated_buffer, blocking=True)
         led_off()
              
     # INACTIVITY TIMEOUT
@@ -974,7 +992,7 @@ while True:
             state["current_page"] = current
             save_index(INDEX_FILE, current)
             state_save(state)
-            time.sleep(0.5)
+            time.sleep(2.0)
             led_off()
             
             board.ENABLE_DIO.value = False
