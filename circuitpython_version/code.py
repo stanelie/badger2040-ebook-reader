@@ -2,8 +2,11 @@
 CircuitPython E-book Reader for Badger 2040
 Ported from MicroPython to use uc8151_circuitpython driver
 
-FINAL VERSION 2.25:
+FINAL VERSION 2.26:
 - Memory fix: Only keep remainders for current and next page
+- Fixed fast advance to properly advance 50 pages
+- Handle deleted books gracefully
+- Removed redundant B button cancel from file picker
 - Non-blocking display updates for responsive navigation
 - Background pre-rendering during display refresh
 - Optimized performance
@@ -481,12 +484,7 @@ def list_books():
 def file_picker():
     global end_of_index_reached
     
-    t_start = time.monotonic()
-    print("FILE PICKER: Starting...")
-    
     books = list_books()
-    t_books = time.monotonic()
-    print(f"FILE PICKER: list_books took {t_books - t_start:.3f}s")
     
     if not books:
         display.fb.fill(0)
@@ -504,27 +502,15 @@ def file_picker():
     
     while True:
         if offset != prev_offset:
-            t_render_start = time.monotonic()
-            print(f"FILE PICKER: Rendering page offset={offset}")
-            
             selection_buffers = []
             
             for sel_idx in range(per_page):
-                t_book_start = time.monotonic()
-                
                 book_idx = offset + sel_idx
                 if book_idx >= len(books):
                     break
                 
-                # Clear buffer
-                t_clear = time.monotonic()
                 for i in range(len(raw_working_buffer)): raw_working_buffer[i] = 0
-                print(f"  Book {book_idx}: Buffer clear {time.monotonic() - t_clear:.3f}s")
-                
-                # Create framebuffer
-                t_fb = time.monotonic()
                 temp_fb = adafruit_framebuf.FrameBuffer(raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB)
-                print(f"  Book {book_idx}: FB create {time.monotonic() - t_fb:.3f}s")
                 
                 old_fb = display.fb
                 old_raw_fb = display.raw_fb
@@ -532,7 +518,6 @@ def file_picker():
                 display.raw_fb = raw_working_buffer
                 
                 try:
-                    t_draw = time.monotonic()
                     temp_fb.fill(0)
                     display.text("Select Book:", 5, 5, 1)
                     
@@ -558,21 +543,16 @@ def file_picker():
                     STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING
                     STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING 
                     temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
-                    print(f"  Book {book_idx}: Drawing {time.monotonic() - t_draw:.3f}s")
                     
                 finally:
                     display.fb = old_fb
                     display.raw_fb = old_raw_fb
                 
-                # Rotation
-                t_rotate = time.monotonic()
                 rotated = display._rotate_framebuffer(raw_working_buffer)
                 buffer_copy = bytearray(len(rotated))
                 for i in range(len(rotated)):
                     buffer_copy[i] = rotated[i]
                 selection_buffers.append(buffer_copy)
-                print(f"  Book {book_idx}: Rotation & copy {time.monotonic() - t_rotate:.3f}s")
-                print(f"  Book {book_idx}: TOTAL {time.monotonic() - t_book_start:.3f}s")
             
             prev_offset = offset
             
@@ -581,8 +561,6 @@ def file_picker():
             elif selected >= offset + len(selection_buffers):
                 selected = offset + len(selection_buffers) - 1
             
-            # Display initial selection
-            t_display = time.monotonic()
             sel_index_on_page = selected - offset
             if 0 <= sel_index_on_page < len(selection_buffers):
                 old_rot = display.rotation
@@ -590,11 +568,8 @@ def file_picker():
                 display.update(fb=selection_buffers[sel_index_on_page])
                 display.rotation = old_rot
             led_off()
-            print(f"FILE PICKER: Display update {time.monotonic() - t_display:.3f}s")
-            print(f"FILE PICKER: Total render {time.monotonic() - t_render_start:.3f}s")
         
         if button_pressed(buttons["down"]):
-            t_btn = time.monotonic()
             selected = (selected + 1) % len(books)
             
             if selected < offset or selected >= offset + per_page:
@@ -606,11 +581,10 @@ def file_picker():
                     display.rotation = 0
                     display.update(fb=selection_buffers[sel_index_on_page])
                     display.rotation = old_rot
-            print(f"FILE PICKER: Down button {time.monotonic() - t_btn:.3f}s")
+            
             time.sleep(0.15)
             
         elif button_pressed(buttons["up"]):
-            t_btn = time.monotonic()
             selected = (selected - 1) % len(books)
             
             if selected < offset or selected >= offset + per_page:
@@ -622,21 +596,14 @@ def file_picker():
                     display.rotation = 0
                     display.update(fb=selection_buffers[sel_index_on_page])
                     display.rotation = old_rot
-            print(f"FILE PICKER: Up button {time.monotonic() - t_btn:.3f}s")
+            
             time.sleep(0.15)
             
         elif button_pressed(buttons["a"]) or button_pressed(buttons["c"]):
             while button_pressed(buttons["a"]) or button_pressed(buttons["c"]):
                 time.sleep(0.05)
             end_of_index_reached = False
-            print(f"FILE PICKER: Total time {time.monotonic() - t_start:.3f}s")
             return books[selected]
-            
-        elif button_pressed(buttons["b"]):
-            while button_pressed(buttons["b"]):
-                time.sleep(0.05)
-            print(f"FILE PICKER: Cancelled after {time.monotonic() - t_start:.3f}s")
-            return None
         
         time.sleep(0.05)
 
@@ -955,92 +922,101 @@ while True:
         gc.collect()
         led_off()
 
-# FILE PICKER
+    # FILE PICKER
     if button_pressed(buttons["a"]):
-        print("BUTTON A: Pressed, starting file picker sequence...")
         led_on()
         
-        # Don't save index here - it's already in memory and will be saved if needed
+        # Save current state before entering picker
+        saved_current = current
+        saved_next_page_ready = next_page_ready
+        
         state["current_page"] = current
         
         new_book = file_picker()
         
         if new_book:
-            print(f"FILE PICKER: Book selected, loading '{new_book}'...")
             led_on()
             
-            # Save OLD book's index before switching
+            # Save OLD book's index before switching (only if actually switching)
             if text_file != new_book:
                 print(f"BOOK SWITCH: Saving old book index ({len(page_offsets)} pages)...")
                 t_save = time.monotonic()
                 save_index(INDEX_FILE, current)
                 state_save(state)
                 print(f"BOOK SWITCH: Save took {time.monotonic() - t_save:.3f}s")
-            
-            text_file = new_book
-            state["last_book"] = text_file
-            
-            INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
-            
-            try:
-                os.stat(INDEX_FILE)
-                current = load_index(INDEX_FILE)
-            except OSError:
-                page_offsets = [0]
-                page_remainders = {}
-                current = 0
+                
+                text_file = new_book
+                state["last_book"] = text_file
+                
+                INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
+                
+                try:
+                    os.stat(INDEX_FILE)
+                    current = load_index(INDEX_FILE)
+                except OSError:
+                    page_offsets = [0]
+                    page_remainders = {}
+                    current = 0
 
-            current = min(current, max(0, len(page_offsets)-1))
-            state["current_page"] = current
-            
-            # Clean up loaded remainders
-            keep_only_needed_remainders(current)
-            
-            end_of_index_reached = False 
+                current = min(current, max(0, len(page_offsets)-1))
+                state["current_page"] = current
+                
+                # Clean up loaded remainders
+                keep_only_needed_remainders(current)
+                
+                end_of_index_reached = False 
 
-            render_page_and_rotate(current, current_rotated_buffer)
-            update_display_fast(current_rotated_buffer)
-            
-            next_page_ready = False
-            
-            if current + 1 >= len(page_offsets):
-                 current_offset = page_offsets[current]
-                 curr_rem = page_remainders.get(current, b"")
-                 
-                 lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
-                 
-                 advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
-                 is_loop_stuck = (next_off == current_offset) and (next_rem == curr_rem) and (len(next_rem) > 0)
-                 
-                 if is_loop_stuck:
-                      lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
-                 
-                      if skip_off > current_offset:
-                          next_off, next_rem = skip_off, skip_rem
-                          advanced = True 
-                      else:
-                          advanced = False
+                render_page_and_rotate(current, current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+                
+                next_page_ready = False
+                
+                if current + 1 >= len(page_offsets):
+                     current_offset = page_offsets[current]
+                     curr_rem = page_remainders.get(current, b"")
+                     
+                     lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                     
+                     advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+                     is_loop_stuck = (next_off == current_offset) and (next_rem == curr_rem) and (len(next_rem) > 0)
+                     
+                     if is_loop_stuck:
+                          lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+                     
+                          if skip_off > current_offset:
+                              next_off, next_rem = skip_off, skip_rem
+                              advanced = True 
+                          else:
+                              advanced = False
 
-                 if lines and advanced: 
-                     page_offsets.append(next_off)
-                     page_remainders[current+1] = next_rem
-                 else:
-                     end_of_index_reached = True
+                     if lines and advanced: 
+                         page_offsets.append(next_off)
+                         page_remainders[current+1] = next_rem
+                     else:
+                         end_of_index_reached = True
 
-            if current + 1 < len(page_offsets):
-                 render_page_and_rotate(current + 1, next_rotated_buffer)
-                 next_page_ready = True
-            
-            keep_only_needed_remainders(current)
-            save_index(INDEX_FILE, current) 
-            state_save(state)
-            gc.collect()
+                if current + 1 < len(page_offsets):
+                     render_page_and_rotate(current + 1, next_rotated_buffer)
+                     next_page_ready = True
+                
+                keep_only_needed_remainders(current)
+                save_index(INDEX_FILE, current) 
+                state_save(state)
+                gc.collect()
+            else:
+                # Same book selected - just restore display
+                current = saved_current
+                next_page_ready = saved_next_page_ready
+                render_page_and_rotate(current, current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+                
+                if not next_page_ready and current + 1 < len(page_offsets):
+                    render_page_and_rotate(current + 1, next_rotated_buffer)
+                    next_page_ready = True
+                
+                gc.collect()
             
             led_off()
-        else:
-             update_display_fast(current_rotated_buffer)
-             led_off()
-             print("FILE PICKER: No book selected, restoring display")
     
     # BUTTON B - SCREEN CLEAN (X-filled -> Empty -> Restore)
     if button_pressed(buttons["b"]):
