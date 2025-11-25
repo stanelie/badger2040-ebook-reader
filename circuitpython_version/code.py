@@ -2,6 +2,11 @@
 CircuitPython E-book Reader for Badger 2040
 Ported from MicroPython to use uc8151_circuitpython driver
 
+FINAL VERSION 2.25:
+- Memory fix: Only keep remainders for current and next page
+- Non-blocking display updates for responsive navigation
+- Background pre-rendering during display refresh
+- Optimized performance
 """
 import board
 import displayio
@@ -324,6 +329,10 @@ def paginate_text(file_path, start_offset, remainder=b""):
             gc.collect()
             return lines, next_offset, remainder
             
+    except OSError as e:
+        print(f"ERROR: File not found or cannot be read: {file_path}")
+        gc.collect()
+        return [], start_offset, b""
     except Exception as e:
         print(f"ERROR: Paginate failure: {e}")
         gc.collect()
@@ -531,7 +540,7 @@ def file_picker():
                         idx = offset + i
                         if idx >= len(books): break
                         name = books[idx].split("/")[-1]
-                        if len(name) > 25: name = name[:22] + "..."
+                        if len(name) > 33: name = name[:30] + "..."
                         y = 25 + i * 16
                         
                         if i == sel_idx:
@@ -636,11 +645,32 @@ led_on()
 state = state_load()
 text_file = state.get("last_book", "")
 
+# Check if the last book still exists
+if text_file:
+    try:
+        os.stat(text_file)
+        print(f"Last book found: {text_file}")
+    except OSError:
+        print(f"Last book '{text_file}' no longer exists, will show picker")
+        text_file = ""
+        state["last_book"] = ""
+        state["current_page"] = 0
+
 if not text_file:
     books = list_books()
     if books:
-        text_file = books[0]
-        state["last_book"] = text_file
+        print("Showing file picker to select a book...")
+        # Show file picker immediately
+        new_book = file_picker()
+        if new_book:
+            text_file = new_book
+            state["last_book"] = text_file
+            state["current_page"] = 0
+            state_save(state)
+        else:
+            # User cancelled picker, just use first book
+            text_file = books[0]
+            state["last_book"] = text_file
     else:
         display.fb.fill(0)
         display.text("No books in /books", 10, 50, 1)
@@ -652,10 +682,12 @@ INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
 try:
     os.stat(INDEX_FILE)
     current = load_index(INDEX_FILE)
+    print(f"Loaded index with {len(page_offsets)} pages")
 except OSError:
     page_offsets = [0]
     page_remainders = {}
     current = 0
+    print("No index found, starting fresh")
     
 end_of_index_reached = False
 
