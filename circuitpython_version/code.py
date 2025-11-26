@@ -2,7 +2,8 @@
 CircuitPython E-book Reader for Badger 2040
 Ported from MicroPython to use uc8151_circuitpython driver
 
-FINAL VERSION 2.26:
+FINAL VERSION 2.27:
+- Fixed sleep/resume to properly save and restore page position
 - Memory fix: Only keep remainders for current and next page
 - Fixed fast advance to properly advance 50 pages
 - Handle deleted books gracefully
@@ -50,8 +51,13 @@ def state_save(state):
             f.write(data)
             f.write(struct.pack("<H", len(file_path)))
             f.write(file_path.encode("utf-8"))
-    except OSError:
-        pass
+        # Explicit sync to ensure data is written to flash
+        try:
+            os.sync()
+        except:
+            pass
+    except OSError as e:
+        print(f"Error saving state: {e}")
     except Exception as e:
         print("Error saving state:", e)
 
@@ -442,8 +448,13 @@ def save_index(file_path, current_page=0):
                 f.write(struct.pack("<I", k))
                 f.write(struct.pack("<I", len(rem)))
                 f.write(rem)
-    except OSError:
-        pass
+        # Explicit sync to ensure data is written to flash
+        try:
+            os.sync()
+        except:
+            pass
+    except OSError as e:
+        print(f"ERROR: Failed to save index: {e}")
 
 def load_index(file_path):
     global page_offsets, page_remainders
@@ -649,7 +660,7 @@ INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
 try:
     os.stat(INDEX_FILE)
     current = load_index(INDEX_FILE)
-    print(f"Loaded index with {len(page_offsets)} pages")
+    print(f"Loaded index with {len(page_offsets)} pages, resuming at page {current}")
 except OSError:
     page_offsets = [0]
     page_remainders = {}
@@ -1040,10 +1051,14 @@ while True:
         else:
             led_on()
             
+            print(f"Going to sleep, saving state at page {current}")
             state["current_page"] = current
             save_index(INDEX_FILE, current)
             state_save(state)
-            time.sleep(4.0)
+            
+            # Give time for writes to complete
+            time.sleep(2)
+            
             led_off()
             
             board.ENABLE_DIO.value = False
