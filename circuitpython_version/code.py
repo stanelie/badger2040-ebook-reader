@@ -1,16 +1,6 @@
 """
 CircuitPython E-book Reader for Badger 2040
 Ported from MicroPython to use uc8151_circuitpython driver
-
-FINAL VERSION 2.27:
-- Fixed sleep/resume to properly save and restore page position
-- Memory fix: Only keep remainders for current and next page
-- Fixed fast advance to properly advance 50 pages
-- Handle deleted books gracefully
-- Removed redundant B button cancel from file picker
-- Non-blocking display updates for responsive navigation
-- Background pre-rendering during display refresh
-- Optimized performance
 """
 import board
 import displayio
@@ -22,19 +12,16 @@ import vga2_8x16
 import gc
 import adafruit_framebuf
 import analogio   
-import microcontroller
-import alarm
+# import microcontroller
+# import alarm
 import pwmio
-
-# LED Configuration
-LED_DUTY_CYCLE = 40  # LED brightness when "on" (0-100%)
-
-displayio.release_displays()
-
+# import storage
 from uc8151_circuitpython import UC8151
 
-# ---------------- STATE -----------------
-STATE_FILE = "/state/ebook_state.bin"
+LED_DUTY_CYCLE = 40
+INACTIVITY_TIMEOUT = 300
+
+displayio.release_displays()
 
 # Create directories if they don't exist
 for d in ["/books", "/state"]:
@@ -43,23 +30,31 @@ for d in ["/books", "/state"]:
     except OSError:
         pass
 
+# ---------------- STATE -----------------
+STATE_FILE = "/state/ebook_state.bin"
+
 def state_save(state):
     try:
+        page = state.get("current_page", 0)
+        book = state.get("last_book", "")
+        
         with open(STATE_FILE, "wb") as f:
             file_path = state.get("last_book", "")
             data = struct.pack("<I", state.get("current_page", 0))
             f.write(data)
             f.write(struct.pack("<H", len(file_path)))
             f.write(file_path.encode("utf-8"))
+        
         # Explicit sync to ensure data is written to flash
         try:
             os.sync()
         except:
             pass
+        
     except OSError as e:
-        print(f"Error saving state: {e}")
+        print(f"state_save ERROR: {e}")
     except Exception as e:
-        print("Error saving state:", e)
+        print(f"state_save ERROR: {e}")
 
 def state_load():
     state = {"current_page": 0, "last_book": ""}
@@ -72,10 +67,10 @@ def state_load():
                 last_book = f.read(l).decode("utf-8")
                 state["current_page"] = current_page
                 state["last_book"] = last_book
-    except OSError:
-        pass
+    except OSError as e:
+        print(f"state_load: No state file found ({e})")
     except Exception as e:
-        print("state_load failed:", e)
+        print(f"state_load ERROR: {e}")
     return state
 
 # ---------------- CONFIG -----------------
@@ -86,7 +81,6 @@ WIDTH = 296
 HEIGHT = 128
 TEXT_WIDTH = WIDTH - TEXT_PADDING*2
 MAX_CHARS = TEXT_WIDTH // vga2_8x16.WIDTH
-INACTIVITY_TIMEOUT = 300
 BOOK_DIR = "/books"
 
 # 5x8 Font Dimensions (used for status text)
@@ -96,8 +90,7 @@ FONT_H_5X8 = 8
 last_activity = time.monotonic()
 
 # ---------------- GLOBAL INDEX STATE -----------------
-end_of_index_reached = False 
-# -----------------------------------------------------
+end_of_index_reached = False
 
 # ---------------- DISPLAY -----------------
 spi = board.SPI()
@@ -123,39 +116,12 @@ display = UC8151(
 display.enable_quick_updates(True)
 
 # ---------------- LED -----------------
-led = None
-led_is_pwm = False
-
-# Try PWM first
-try:
-    led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
-    led_is_pwm = True
-except:
-    # Fall back to digital IO
-    try:
-        led = digitalio.DigitalInOut(board.USER_LED)
-        led.direction = digitalio.Direction.OUTPUT
-        led.value = False
-        led_is_pwm = False
-    except:
-        pass
-
+led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
 def led_on():
-    if led:
-        if led_is_pwm:
-            # Convert percentage to 16-bit duty cycle value (0-65535)
-            duty_value = int((LED_DUTY_CYCLE / 100.0) * 65535)
-            led.duty_cycle = duty_value
-        else:
-            # For digital LED, just turn it on (software PWM not practical in main loop)
-            led.value = True
-
+    duty_value = int((LED_DUTY_CYCLE / 100.0) * 65535)
+    led.duty_cycle = duty_value
 def led_off():
-    if led:
-        if led_is_pwm:
-            led.duty_cycle = 0
-        else:
-            led.value = False
+    led.duty_cycle = 0
 
 # --- BUFFERS ---
 raw_working_buffer = bytearray(display.width * display.height // 8)
@@ -448,13 +414,15 @@ def save_index(file_path, current_page=0):
                 f.write(struct.pack("<I", k))
                 f.write(struct.pack("<I", len(rem)))
                 f.write(rem)
+        
         # Explicit sync to ensure data is written to flash
         try:
             os.sync()
         except:
             pass
+        
     except OSError as e:
-        print(f"ERROR: Failed to save index: {e}")
+        print(f"save_index ERROR: {e}")
 
 def load_index(file_path):
     global page_offsets, page_remainders
@@ -475,8 +443,10 @@ def load_index(file_path):
                     page_remainders[k] = rem
             except:
                 pass
-            return saved_page
-    except Exception:
+        
+        return saved_page
+    except Exception as e:
+        print(f"load_index ERROR: {e}")
         page_offsets = [0]
         page_remainders = {}
         return 0
@@ -610,8 +580,8 @@ def file_picker():
             
             time.sleep(0.15)
             
-        elif button_pressed(buttons["a"]) or button_pressed(buttons["c"]):
-            while button_pressed(buttons["a"]) or button_pressed(buttons["c"]):
+        elif button_pressed(buttons["a"]):
+            while button_pressed(buttons["a"]):
                 time.sleep(0.05)
             end_of_index_reached = False
             return books[selected]
@@ -627,7 +597,6 @@ text_file = state.get("last_book", "")
 if text_file:
     try:
         os.stat(text_file)
-        print(f"Last book found: {text_file}")
     except OSError:
         print(f"Last book '{text_file}' no longer exists, will show picker")
         text_file = ""
@@ -637,7 +606,6 @@ if text_file:
 if not text_file:
     books = list_books()
     if books:
-        print("Showing file picker to select a book...")
         # Show file picker immediately
         new_book = file_picker()
         if new_book:
@@ -660,12 +628,10 @@ INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
 try:
     os.stat(INDEX_FILE)
     current = load_index(INDEX_FILE)
-    print(f"Loaded index with {len(page_offsets)} pages, resuming at page {current}")
 except OSError:
     page_offsets = [0]
     page_remainders = {}
     current = 0
-    print("No index found, starting fresh")
     
 end_of_index_reached = False
 
@@ -675,7 +641,6 @@ state["current_page"] = current
 # Clean up loaded remainders to only what we need
 keep_only_needed_remainders(current)
 
-print("Initial render...")
 render_page_and_rotate(current, current_rotated_buffer)
 update_display_fast(current_rotated_buffer)
 
@@ -700,18 +665,16 @@ keep_only_needed_remainders(current)
 gc.collect()
 led_off()
 
-print("Ready!")
-
 # --- MAIN LOOP ---
 while True:
     if any(button_pressed(b) for b in buttons.values()):
         last_activity = time.monotonic()
         
     # PAGE DOWN
-    if button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
+    if button_pressed(buttons["down"]):
         led_on()
         press_start = time.monotonic()
-        while button_pressed(buttons["down"]) or button_pressed(buttons["c"]):
+        while button_pressed(buttons["down"]):
             time.sleep(0.05)
         press_duration = time.monotonic() - press_start
         
@@ -728,7 +691,6 @@ while True:
                     
                     # Check if we've reached the end of the file
                     if next_off <= page_offsets[current] or not lines:
-                        print(f"Reached end of file at page {current}")
                         break
                     
                     page_offsets.append(next_off)
@@ -744,7 +706,6 @@ while True:
                     gc.collect()
             
             pages_advanced = current - start_page
-            print(f"Fast advanced {pages_advanced} pages")
             
             gc.collect()
             current = min(current, len(page_offsets) - 1)
@@ -950,11 +911,8 @@ while True:
             
             # Save OLD book's index before switching (only if actually switching)
             if text_file != new_book:
-                print(f"BOOK SWITCH: Saving old book index ({len(page_offsets)} pages)...")
-                t_save = time.monotonic()
                 save_index(INDEX_FILE, current)
                 state_save(state)
-                print(f"BOOK SWITCH: Save took {time.monotonic() - t_save:.3f}s")
                 
                 text_file = new_book
                 state["last_book"] = text_file
@@ -1029,17 +987,24 @@ while True:
             
             led_off()
     
-    # BUTTON B - SCREEN CLEAN (X-filled -> Empty -> Restore)
+    # BUTTON B - DEBUG: SAVE STATE + SCREEN REFRESH
     if button_pressed(buttons["b"]):
         led_on()
         while button_pressed(buttons["b"]):
             time.sleep(0.05)
-        
+        # Screen refresh: X-filled -> Empty -> Restore
         display.fb.fill(0)
         display.update(blocking=True)
         display.fb.fill(1)
         display.update(blocking=True)
         update_display_fast(current_rotated_buffer, blocking=True)
+        led_off()
+    
+    # BUTTON C - DEBUG: LOAD STATE
+    if button_pressed(buttons["c"]):
+        led_on()
+        while button_pressed(buttons["c"]):
+            time.sleep(0.05)
         led_off()
              
     # INACTIVITY TIMEOUT
@@ -1051,16 +1016,29 @@ while True:
         else:
             led_on()
             
-            print(f"Going to sleep, saving state at page {current}")
             state["current_page"] = current
+
             save_index(INDEX_FILE, current)
             state_save(state)
+            time.sleep(0.5)  # Give filesystem time to buffer
             
-            # Give time for writes to complete
-            time.sleep(2)
+            for i in range(3): # Multiple sync attempts to ensure data is flushed
+                try:
+                    os.sync()
+                    time.sleep(0.2)
+                except:
+                    pass
             
-            led_off()
+            time.sleep(0.3) # Wait a bit before verification
             
-            board.ENABLE_DIO.value = False
+            try:
+                verify_state = state_load()
+                if verify_state.get("current_page") != current:
+                    print(f"SLEEP: WARNING - State verification failed! Expected {current}, got {verify_state.get('current_page')}")
+            except Exception as e:
+                print(f"SLEEP: WARNING - Could not verify state: {e}")
 
-    time.sleep(0.01)
+            time.sleep(0.5) # Final delay before power down
+                     
+            board.ENABLE_DIO.value = False
+            led_off()
