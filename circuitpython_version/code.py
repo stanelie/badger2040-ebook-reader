@@ -11,15 +11,31 @@ import struct
 import vga2_8x16
 import gc
 import adafruit_framebuf
-import analogio   
-# import microcontroller
-# import alarm
+import analogio
 import pwmio
-# import storage
 from uc8151_circuitpython import UC8151
 
 LED_DUTY_CYCLE = 40
 INACTIVITY_TIMEOUT = 300
+
+# ---------------- LED -----------------
+led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
+def led_on():
+    duty_value = int((LED_DUTY_CYCLE / 100.0) * 65535)
+    led.duty_cycle = duty_value
+def led_off():
+    led.duty_cycle = 0
+led_on()
+
+# DEBUG FLAG - set to False to disable timing output
+DEBUG_TIMING = True
+
+def debug_time(label, start_time):
+    """Print debug timing info"""
+    if DEBUG_TIMING:
+        elapsed = (time.monotonic() - start_time) * 1000  # Convert to ms
+        print(f"[DEBUG] {label}: {elapsed:.1f}ms")
+    return time.monotonic()
 
 displayio.release_displays()
 
@@ -114,14 +130,6 @@ display = UC8151(
 )
 
 display.enable_quick_updates(True)
-
-# ---------------- LED -----------------
-led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
-def led_on():
-    duty_value = int((LED_DUTY_CYCLE / 100.0) * 65535)
-    led.duty_cycle = duty_value
-def led_off():
-    led.duty_cycle = 0
 
 # --- BUFFERS ---
 raw_working_buffer = bytearray(display.width * display.height // 8)
@@ -354,7 +362,7 @@ def render_page_and_rotate(page_num, target_rotated_buffer):
         if charging:
              status_text = "USB"
         elif pct >= 0:
-             status_text = f"{pct}%"
+             status_text = f"{pct}"
         else:
              status_text = ""
         
@@ -589,7 +597,7 @@ def file_picker():
         time.sleep(0.05)
 
 # ---------------- MAIN -----------------
-led_on()
+
 state = state_load()
 text_file = state.get("last_book", "")
 
@@ -672,16 +680,29 @@ while True:
         
     # PAGE DOWN
     if button_pressed(buttons["down"]):
+        t_total_start = time.monotonic()
+        if DEBUG_TIMING:
+            print("\n" + "="*50)
+            print("[DEBUG] DOWN BUTTON PRESSED")
+            print("="*50)
+        
         led_on()
+        t0 = debug_time("LED on", t_total_start)
+        
         press_start = time.monotonic()
         while button_pressed(buttons["down"]):
             time.sleep(0.05)
         press_duration = time.monotonic() - press_start
+        t0 = debug_time(f"Button release wait (duration: {press_duration*1000:.0f}ms)", t0)
         
         if press_duration > 0.7:  # Long press: 50-page fast advance
+            if DEBUG_TIMING:
+                print("[DEBUG] LONG PRESS - Fast advance mode")
+            
             FAST_ADVANCE_PAGES = 50
             start_page = current
             
+            t_fast_start = time.monotonic()
             for i in range(FAST_ADVANCE_PAGES):
                 next_page = current + 1
                 
@@ -706,45 +727,85 @@ while True:
                     gc.collect()
             
             pages_advanced = current - start_page
+            t0 = debug_time(f"Fast advance {pages_advanced} pages", t_fast_start)
             
             gc.collect()
+            t0 = debug_time("gc.collect after fast advance", t0)
+            
             current = min(current, len(page_offsets) - 1)
             
             # Save progress after fast advance
+            t_save_start = time.monotonic()
             save_index(INDEX_FILE, current)
+            t0 = debug_time("save_index", t_save_start)
+            
             state["current_page"] = current
             
+            t_render_start = time.monotonic()
             render_page_and_rotate(current, current_rotated_buffer)
+            t0 = debug_time("render_page_and_rotate (current)", t_render_start)
+            
+            t_display_start = time.monotonic()
             update_display_fast(current_rotated_buffer)
+            t0 = debug_time("update_display_fast", t_display_start)
             
             next_page_ready = False
             if current + 1 < len(page_offsets):
+                t_prerender_start = time.monotonic()
                 render_page_and_rotate(current + 1, next_rotated_buffer)
+                t0 = debug_time("render_page_and_rotate (next, pre-render)", t_prerender_start)
                 next_page_ready = True
             
         else:  # Short press: normal single page advance
+            if DEBUG_TIMING:
+                print("[DEBUG] SHORT PRESS - Normal page advance")
+                print(f"[DEBUG] next_page_ready={next_page_ready}, current={current}, len(page_offsets)={len(page_offsets)}")
+            
             if current + 1 < len(page_offsets) and next_page_ready:
-                current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
+                if DEBUG_TIMING:
+                    print("[DEBUG] PATH: Pre-rendered next page available")
                 
+                t_swap_start = time.monotonic()
+                current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
+                t0 = debug_time("Buffer swap", t_swap_start)
+                
+                t_display_start = time.monotonic()
                 if update_display_fast(current_rotated_buffer, blocking=False):
+                    t0 = debug_time("update_display_fast (non-blocking)", t_display_start)
+                    
                     current += 1
+                    t0 = debug_time("Increment current", t0)
+                    
+                    t_cleanup_start = time.monotonic()
                     keep_only_needed_remainders(current)
+                    t0 = debug_time("keep_only_needed_remainders", t_cleanup_start)
+                    
                     next_page_ready = False
                     end_of_index_reached = False
                     
                     if current + 1 < len(page_offsets):
+                        if DEBUG_TIMING:
+                            print("[DEBUG] Pre-rendering next page from existing index")
+                        t_prerender_start = time.monotonic()
                         render_page_and_rotate(current + 1, next_rotated_buffer)
+                        t0 = debug_time("render_page_and_rotate (next)", t_prerender_start)
                         next_page_ready = True
                     elif not end_of_index_reached:
+                        if DEBUG_TIMING:
+                            print("[DEBUG] Need to paginate for next page")
                         current_offset = page_offsets[current]
                         curr_rem = page_remainders.get(current, b"")
                         
+                        t_paginate_start = time.monotonic()
                         lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                        t0 = debug_time("paginate_text", t_paginate_start)
                         
                         advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
                         is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
                         
                         if is_loop_stuck:
+                            if DEBUG_TIMING:
+                                print("[DEBUG] Loop stuck detected, attempting recovery")
                             lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
                             if skip_off > current_offset:
                                 next_off, next_rem = skip_off, skip_rem
@@ -755,36 +816,51 @@ while True:
                         if lines and advanced:
                             page_offsets.append(next_off)
                             page_remainders[current+1] = next_rem
+                            t_prerender_start = time.monotonic()
                             render_page_and_rotate(current + 1, next_rotated_buffer)
+                            t0 = debug_time("render_page_and_rotate (next, after paginate)", t_prerender_start)
                             next_page_ready = True
                         else:
                             end_of_index_reached = True
                     
+                    t_wait_start = time.monotonic()
                     wait_for_display()
+                    t0 = debug_time("wait_for_display", t_wait_start)
                 else:
-                    update_display_fast(current_rotated_buffer, blocking=True)
+                    t0 = debug_time("update_display_fast (blocking fallback)", t_display_start)
                     current += 1
                     keep_only_needed_remainders(current)
                     next_page_ready = False
                     end_of_index_reached = False
                 
             elif current + 1 < len(page_offsets):
+                if DEBUG_TIMING:
+                    print("[DEBUG] PATH: Next page in index but not pre-rendered")
+                
                 current += 1
                 keep_only_needed_remainders(current)
                 
+                t_render_start = time.monotonic()
                 render_page_and_rotate(current, current_rotated_buffer)
+                t0 = debug_time("render_page_and_rotate (current)", t_render_start)
                 
+                t_display_start = time.monotonic()
                 if update_display_fast(current_rotated_buffer, blocking=False):
+                    t0 = debug_time("update_display_fast (non-blocking)", t_display_start)
                     end_of_index_reached = False
                     
                     if current + 1 < len(page_offsets):
+                        t_prerender_start = time.monotonic()
                         render_page_and_rotate(current + 1, next_rotated_buffer)
+                        t0 = debug_time("render_page_and_rotate (next)", t_prerender_start)
                         next_page_ready = True
                     elif not end_of_index_reached:
                         current_offset = page_offsets[current]
                         curr_rem = page_remainders.get(current, b"")
                         
+                        t_paginate_start = time.monotonic()
                         lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                        t0 = debug_time("paginate_text", t_paginate_start)
                         
                         advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
                         is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
@@ -800,23 +876,34 @@ while True:
                         if lines and advanced:
                             page_offsets.append(next_off)
                             page_remainders[current+1] = next_rem
+                            t_prerender_start = time.monotonic()
                             render_page_and_rotate(current + 1, next_rotated_buffer)
+                            t0 = debug_time("render_page_and_rotate (next)", t_prerender_start)
                             next_page_ready = True
                         else:
                             end_of_index_reached = True
                     
+                    t_wait_start = time.monotonic()
                     wait_for_display()
+                    t0 = debug_time("wait_for_display", t_wait_start)
                 
             elif len(page_offsets) > 0:
+                if DEBUG_TIMING:
+                    print("[DEBUG] PATH: Need to paginate new page")
+                
                 current_offset = page_offsets[current]
                 curr_rem = page_remainders.get(current, b"")
                 
+                t_paginate_start = time.monotonic()
                 lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                t0 = debug_time("paginate_text (initial)", t_paginate_start)
                 
                 advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
                 is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
                 
                 if is_loop_stuck:
+                    if DEBUG_TIMING:
+                        print("[DEBUG] Loop stuck detected")
                     lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
                     
                     if skip_off > current_offset:
@@ -832,19 +919,27 @@ while True:
                     current += 1
                     keep_only_needed_remainders(current)
                     
+                    t_render_start = time.monotonic()
                     render_page_and_rotate(current, current_rotated_buffer)
+                    t0 = debug_time("render_page_and_rotate (current)", t_render_start)
                     
+                    t_display_start = time.monotonic()
                     if update_display_fast(current_rotated_buffer, blocking=False):
+                        t0 = debug_time("update_display_fast (non-blocking)", t_display_start)
                         end_of_index_reached = False
                         
                         if current + 1 < len(page_offsets):
+                            t_prerender_start = time.monotonic()
                             render_page_and_rotate(current + 1, next_rotated_buffer)
+                            t0 = debug_time("render_page_and_rotate (next)", t_prerender_start)
                             next_page_ready = True
                         elif not end_of_index_reached:
                             current_offset = page_offsets[current]
                             curr_rem = page_remainders.get(current, b"")
                             
+                            t_paginate_start = time.monotonic()
                             lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                            t0 = debug_time("paginate_text", t_paginate_start)
                             
                             advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
                             is_loop_stuck = (next_off == current_offset) and (0 < len(next_rem) < MAX_CHARS * 2)
@@ -860,19 +955,34 @@ while True:
                             if lines and advanced:
                                 page_offsets.append(next_off)
                                 page_remainders[current+1] = next_rem
+                                t_prerender_start = time.monotonic()
                                 render_page_and_rotate(current + 1, next_rotated_buffer)
+                                t0 = debug_time("render_page_and_rotate (next)", t_prerender_start)
                                 next_page_ready = True
                             else:
                                 end_of_index_reached = True
                         
+                        t_wait_start = time.monotonic()
                         wait_for_display()
+                        t0 = debug_time("wait_for_display", t_wait_start)
                 else:
                     end_of_index_reached = True
+                    if DEBUG_TIMING:
+                        print("[DEBUG] End of file reached")
 
             state["current_page"] = current
         
+        t_final_sleep = time.monotonic()
         time.sleep(0.003)
+        debug_time("Final sleep", t_final_sleep)
+        
         led_off()
+        
+        if DEBUG_TIMING:
+            total_time = (time.monotonic() - t_total_start) * 1000
+            print("-"*50)
+            print(f"[DEBUG] TOTAL DOWN PRESS TIME: {total_time:.1f}ms")
+            print("="*50 + "\n")
 
     # PAGE UP
     if button_pressed(buttons["up"]):
@@ -894,118 +1004,125 @@ while True:
         gc.collect()
         led_off()
 
-    # FILE PICKER
+    # FILE PICKER (SHORT PRESS) / FULL REFRESH (LONG PRESS)
     if button_pressed(buttons["a"]):
         led_on()
         
-        # Save current state before entering picker
-        saved_current = current
-        saved_next_page_ready = next_page_ready
+        # Measure press duration
+        press_start = time.monotonic()
+        while button_pressed(buttons["a"]):
+            time.sleep(0.05)
+        press_duration = time.monotonic() - press_start
         
-        state["current_page"] = current
-        
-        new_book = file_picker()
-        
-        if new_book:
-            led_on()
-            
-            # Save OLD book's index before switching (only if actually switching)
-            if text_file != new_book:
-                save_index(INDEX_FILE, current)
-                state_save(state)
-                
-                text_file = new_book
-                state["last_book"] = text_file
-                
-                INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
-                
-                try:
-                    os.stat(INDEX_FILE)
-                    current = load_index(INDEX_FILE)
-                except OSError:
-                    page_offsets = [0]
-                    page_remainders = {}
-                    current = 0
-
-                current = min(current, max(0, len(page_offsets)-1))
-                state["current_page"] = current
-                
-                # Clean up loaded remainders
-                keep_only_needed_remainders(current)
-                
-                end_of_index_reached = False 
-
-                render_page_and_rotate(current, current_rotated_buffer)
-                update_display_fast(current_rotated_buffer)
-                
-                next_page_ready = False
-                
-                if current + 1 >= len(page_offsets):
-                     current_offset = page_offsets[current]
-                     curr_rem = page_remainders.get(current, b"")
-                     
-                     lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
-                     
-                     advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
-                     is_loop_stuck = (next_off == current_offset) and (next_rem == curr_rem) and (len(next_rem) > 0)
-                     
-                     if is_loop_stuck:
-                          lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
-                     
-                          if skip_off > current_offset:
-                              next_off, next_rem = skip_off, skip_rem
-                              advanced = True 
-                          else:
-                              advanced = False
-
-                     if lines and advanced: 
-                         page_offsets.append(next_off)
-                         page_remainders[current+1] = next_rem
-                     else:
-                         end_of_index_reached = True
-
-                if current + 1 < len(page_offsets):
-                     render_page_and_rotate(current + 1, next_rotated_buffer)
-                     next_page_ready = True
-                
-                keep_only_needed_remainders(current)
-                save_index(INDEX_FILE, current) 
-                state_save(state)
-                gc.collect()
-            else:
-                # Same book selected - just restore display
-                current = saved_current
-                next_page_ready = saved_next_page_ready
-                render_page_and_rotate(current, current_rotated_buffer)
-                update_display_fast(current_rotated_buffer)
-                
-                if not next_page_ready and current + 1 < len(page_offsets):
-                    render_page_and_rotate(current + 1, next_rotated_buffer)
-                    next_page_ready = True
-                
-                gc.collect()
-            
+        if press_duration > 0.7:  # Long press: Full refresh with speed 0
+            display.set_speed(0, no_flickering=False)
+            update_display_fast(current_rotated_buffer, blocking=True)
+            display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
             led_off()
-    
-    # BUTTON B - DEBUG: SAVE STATE + SCREEN REFRESH
-    if button_pressed(buttons["b"]):
-        led_on()
-        while button_pressed(buttons["b"]):
-            time.sleep(0.05)
-        # Screen refresh: X-filled -> Empty -> Restore
-        display.fb.fill(0)
-        display.update(blocking=True)
-        display.fb.fill(1)
-        display.update(blocking=True)
-        update_display_fast(current_rotated_buffer, blocking=True)
-        led_off()
-    
-    # BUTTON C - DEBUG: LOAD STATE
-    if button_pressed(buttons["c"]):
-        led_on()
-        while button_pressed(buttons["c"]):
-            time.sleep(0.05)
-        led_off()
+        else:  # Short press: File picker
+            # Save current state before entering picker
+            state["current_page"] = current
+            save_index(INDEX_FILE, current)
+            state_save(state)
+            saved_current = current
+            saved_next_page_ready = next_page_ready
+            for i in range(3): # Multiple sync attempts to ensure data is flushed
+                try:
+                    os.sync()
+                    time.sleep(0.2)
+                except:
+                    pass
+            time.sleep(0.3)
+            try:
+                print(f"veryfing write to storage")
+                verify_state = state_load()
+                if verify_state.get("current_page") != current:
+                    print(f"WARNING - State verification failed! Expected {current}, got {verify_state.get('current_page')}")
+            except Exception as e:
+                print(f"WARNING - Could not verify state: {e}")
+            time.sleep(0.3)
+            new_book = file_picker()
+            
+            if new_book:
+                led_on()
+                
+                # Save OLD book's index before switching (only if actually switching)
+                if text_file != new_book:
+                    save_index(INDEX_FILE, current)
+                    state_save(state)
+                    
+                    text_file = new_book
+                    state["last_book"] = text_file
+                    
+                    INDEX_FILE = "/state/" + text_file.replace("/", "_").replace(".", "_") + ".idx"
+                    
+                    try:
+                        os.stat(INDEX_FILE)
+                        current = load_index(INDEX_FILE)
+                    except OSError:
+                        page_offsets = [0]
+                        page_remainders = {}
+                        current = 0
+
+                    current = min(current, max(0, len(page_offsets)-1))
+                    state["current_page"] = current
+                    
+                    # Clean up loaded remainders
+                    keep_only_needed_remainders(current)
+                    
+                    end_of_index_reached = False 
+
+                    render_page_and_rotate(current, current_rotated_buffer)
+                    update_display_fast(current_rotated_buffer)
+                    
+                    next_page_ready = False
+                    
+                    if current + 1 >= len(page_offsets):
+                         current_offset = page_offsets[current]
+                         curr_rem = page_remainders.get(current, b"")
+                         
+                         lines, next_off, next_rem = paginate_text(text_file, current_offset, curr_rem)
+                         
+                         advanced = (next_off > current_offset) or (next_rem and next_rem != curr_rem)
+                         is_loop_stuck = (next_off == current_offset) and (next_rem == curr_rem) and (len(next_rem) > 0)
+                         
+                         if is_loop_stuck:
+                              lines_skipped, skip_off, skip_rem = paginate_text(text_file, current_offset, b"")
+                         
+                              if skip_off > current_offset:
+                                  next_off, next_rem = skip_off, skip_rem
+                                  advanced = True 
+                              else:
+                                  advanced = False
+
+                         if lines and advanced: 
+                             page_offsets.append(next_off)
+                             page_remainders[current+1] = next_rem
+                         else:
+                             end_of_index_reached = True
+
+                    if current + 1 < len(page_offsets):
+                         render_page_and_rotate(current + 1, next_rotated_buffer)
+                         next_page_ready = True
+                    
+                    keep_only_needed_remainders(current)
+                    save_index(INDEX_FILE, current) 
+                    state_save(state)
+                    gc.collect()
+                else:
+                    # Same book selected - just restore display
+                    current = saved_current
+                    next_page_ready = saved_next_page_ready
+                    render_page_and_rotate(current, current_rotated_buffer)
+                    update_display_fast(current_rotated_buffer)
+                    
+                    if not next_page_ready and current + 1 < len(page_offsets):
+                        render_page_and_rotate(current + 1, next_rotated_buffer)
+                        next_page_ready = True
+                    
+                    gc.collect()
+                
+                led_off()
              
     # INACTIVITY TIMEOUT
     if time.monotonic() - last_activity > INACTIVITY_TIMEOUT:
