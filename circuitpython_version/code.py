@@ -28,7 +28,7 @@ def led_off():
 led_on()
 
 # DEBUG FLAG - set to False to disable timing output
-DEBUG_TIMING = True
+DEBUG_TIMING = False
 
 def debug_time(label, start_time):
     """Print debug timing info"""
