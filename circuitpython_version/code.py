@@ -18,7 +18,7 @@ import microcontroller
 from uc8151_circuitpython import UC8151
 
 LED_DUTY_CYCLE = 40
-INACTIVITY_TIMEOUT = 30
+INACTIVITY_TIMEOUT = 300
 
 # ---------------- LED -----------------
 led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
