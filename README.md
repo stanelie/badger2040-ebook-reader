@@ -1,4 +1,4 @@
-<img src="https://github.com/user-attachments/assets/7a14b9e0-4949-4c9f-9d27-3b670a396616" width="300">
+<img src="https://github.com/user-attachments/assets/fd823938-4715-4568-beb6-402af4e0cedd" width="300">
 
 AI coded ebook reader for the badger2040.
 
@@ -20,3 +20,5 @@ Usage :
   Note : because there is very little space on the rp2040, not many .epub files can be stored on it, maybe just one, and the conversion will eat up more space for the extracted text
 
 I like it!
+
+Case is here : https://cad.onshape.com/documents/814dd2a988145f0ed18b6efd/w/66507594fb6b5b6a70cee4f8/e/53ba6e3dcf1a4ae5db1cb3dd?renderMode=0&uiState=693158b53d70a686c43cbc0a
