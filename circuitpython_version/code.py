@@ -1,7 +1,5 @@
 """
 CircuitPython E-book Reader for Badger 2040
-Fully on-the-fly pagination - no filesystem state storage
-State saved to NVRAM only
 """
 import board
 import displayio
@@ -782,54 +780,70 @@ while True:
     if button_pressed(buttons["down"]):
         led_on()
         
-        press_start = time.monotonic()
-        while button_pressed(buttons["down"]):
-            time.sleep(0.05)
-        press_duration = time.monotonic() - press_start
-        
-        if press_duration > 0.7:  # Long press: 50-page fast advance
-            FAST_ADVANCE_PAGES = 50
+        # IMMEDIATE VISUAL FEEDBACK: Advance and display first page instantly
+        page_advanced = False
+        if next_page_ready:
+            # Save current position to history
+            history_push(current_offset, current_remainder)
             
-            for i in range(FAST_ADVANCE_PAGES):
-                lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                
-                if not lines or next_off <= current_offset:
-                    break
-                
-                # Don't save every page to history during fast advance
-                if i % 10 == 0:
-                    history_push(current_offset, current_remainder)
-                    gc.collect()
-                
-                current_offset = next_off
-                current_remainder = next_rem
-            
-            render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+            # Swap buffers and update display immediately
+            current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
+            current_offset = next_page_offset
+            current_remainder = next_page_remainder
             update_display_fast(current_rotated_buffer)
-            
-            # Pre-render next
+            next_page_ready = False
+            page_advanced = True
+        elif current_offset >= 0:
+            # No pre-rendered page, try to advance
             lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
             if lines and next_off > current_offset:
-                next_page_offset = next_off
-                next_page_remainder = next_rem
-                render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
-                next_page_ready = True
-            else:
-                next_page_ready = False
-            
-            force_save_state()  # Always save after fast advance
-            
-        else:  # Short press: single page advance
-            if next_page_ready:
-                # Save current position to history
                 history_push(current_offset, current_remainder)
+                current_offset = next_off
+                current_remainder = next_rem
+                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+                page_advanced = True
+        
+        # Now check if button is still held for long-press detection
+        if page_advanced:
+            press_start = time.monotonic()
+            while button_pressed(buttons["down"]):
+                time.sleep(0.05)
+            press_duration = time.monotonic() - press_start
+            
+            if press_duration > 0.7:  # Long press: continue advancing more pages
+                FAST_ADVANCE_PAGES = 49  # Already advanced 1, so 49 more = 50 total
                 
-                # Swap buffers
-                current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
-                current_offset = next_page_offset
-                current_remainder = next_page_remainder
+                for i in range(FAST_ADVANCE_PAGES):
+                    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
+                    
+                    if not lines or next_off <= current_offset:
+                        break
+                    
+                    # Don't save every page to history during fast advance
+                    if i % 10 == 0:
+                        history_push(current_offset, current_remainder)
+                        gc.collect()
+                    
+                    current_offset = next_off
+                    current_remainder = next_rem
                 
-                # Display (non-blocking)
+                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+                
+                # Pre-render next
+                lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
+                if lines and next_off > current_offset:
+                    next_page_offset = next_off
+                    next_page_remainder = next_rem
+                    render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
+                    next_page_ready = True
+                else:
+                    next_page_ready = False
+                
+                force_save_state()  # Always save after fast advance
+            else:
+                # Short press: single page already advanced, just pre-render next
                 if update_display_fast(current_rotated_buffer, blocking=False):
                     # Pre-render next page while display updates
                     lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
@@ -842,28 +856,18 @@ while True:
                         next_page_ready = False
                     
                     wait_for_display()
-                
-                maybe_save_state()  # Periodic save only
-            else:
-                # Try to advance anyway
-                lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                if lines and next_off > current_offset:
-                    history_push(current_offset, current_remainder)
-                    current_offset = next_off
-                    current_remainder = next_rem
-                    
-                    render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-                    update_display_fast(current_rotated_buffer)
-                    
-                    # Pre-render next
+                else:
+                    # Display update was blocking, pre-render now
                     lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
                     if lines and next_off > current_offset:
                         next_page_offset = next_off
                         next_page_remainder = next_rem
                         render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
                         next_page_ready = True
-                    
-                    maybe_save_state()  # Periodic save only
+                    else:
+                        next_page_ready = False
+                
+                maybe_save_state()  # Periodic save only
         
         led_off()
 
