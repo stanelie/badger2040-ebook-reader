@@ -1,5 +1,7 @@
 """
 CircuitPython E-book Reader for Badger 2040
+Fully on-the-fly pagination - no filesystem state storage
+State saved to NVRAM only
 """
 import board
 import displayio
@@ -8,6 +10,7 @@ import time
 import os
 import struct
 import vga2_8x16
+# import sans_serif_8x16 as vga2_8x16
 import gc
 import adafruit_framebuf
 import analogio
@@ -368,7 +371,8 @@ def paginate_text(file_path, start_offset, remainder=b""):
                 
                 if remainder:
                     line_bytes = remainder
-                    f.seek(start_offset + len(remainder))
+                    pos = start_offset  # The remainder conceptually "starts" at start_offset
+                    f.seek(start_offset + len(remainder))  # File continues after remainder
                     remainder = b""
                 else:
                     line_bytes = f.readline()
@@ -591,12 +595,22 @@ def list_books():
     return sorted(books)
 
 def file_picker():
+    global first_display_update
     books = list_books()
     
     if not books:
         display.fb.fill(0)
         display.text("No books found!", 10, 40, 1)
-        display.update()
+        
+        # Full refresh if first display
+        if first_display_update:
+            display.set_speed(0, no_flickering=False)
+            display.update()
+            display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+            first_display_update = False
+        else:
+            display.update()
+        
         time.sleep(2)
         return None
     
@@ -673,7 +687,16 @@ def file_picker():
             if 0 <= sel_index_on_page < len(selection_buffers):
                 old_rot = display.rotation
                 display.rotation = 0
-                display.update(fb=selection_buffers[sel_index_on_page])
+                
+                # Full refresh if first display
+                if first_display_update:
+                    display.set_speed(0, no_flickering=False)
+                    display.update(fb=selection_buffers[sel_index_on_page])
+                    display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+                    first_display_update = False
+                else:
+                    display.update(fb=selection_buffers[sel_index_on_page])
+                
                 display.rotation = old_rot
             led_off()
         
@@ -714,6 +737,9 @@ def file_picker():
 
 # ---------------- MAIN -----------------
 
+# Flag to force full refresh on first display update after wake-up
+first_display_update = True
+
 # Load last active book from NVRAM
 text_file = state_load_last_book()
 current_offset = 0
@@ -744,7 +770,16 @@ if not text_file:
     else:
         display.fb.fill(0)
         display.text("No books in /books", 10, 50, 1)
-        display.update()
+        
+        # Full refresh if first display
+        if first_display_update:
+            display.set_speed(0, no_flickering=False)
+            display.update()
+            display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+            first_display_update = False
+        else:
+            display.update()
+        
         while True: 
             time.sleep(1)
 
@@ -753,7 +788,15 @@ history_clear()
 
 # Render current page
 render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-update_display_fast(current_rotated_buffer)
+
+# Full refresh for first display update (only if file_picker wasn't shown)
+if first_display_update:
+    display.set_speed(0, no_flickering=False)
+    update_display_fast(current_rotated_buffer)
+    display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+    first_display_update = False
+else:
+    update_display_fast(current_rotated_buffer)
 
 # Pre-render next page
 lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
@@ -1058,6 +1101,25 @@ while True:
         else:
             led_on()
             force_save_state()  # Critical: save before power down
-            time.sleep(0.1)
+            
+            # Display sleep message
+            for i in range(len(raw_working_buffer)): 
+                raw_working_buffer[i] = 0
+            temp_fb = adafruit_framebuf.FrameBuffer(
+                raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
+            )
+            old_fb, old_raw_fb = display.fb, display.raw_fb
+            display.fb, display.raw_fb = temp_fb, raw_working_buffer
+            try:
+                display.text("Sleeping...", 110, 30, 1)
+                display.text("press any key to wake", 60, 90, 1)
+            finally:
+                display.fb, display.raw_fb = old_fb, old_raw_fb
+            
+            rotated = display._rotate_framebuffer(raw_working_buffer)
+            old_rot = display.rotation
+            display.rotation = 0
+            # display.set_speed(0, no_flickering=False)  # Full refresh for sleep message
+            display.update(fb=rotated)
             board.ENABLE_DIO.value = False
             led_off()
