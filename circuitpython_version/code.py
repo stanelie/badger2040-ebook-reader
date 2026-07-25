@@ -18,6 +18,16 @@ import pwmio
 import microcontroller
 from uc8151_circuitpython import UC8151
 
+# Optional on-device hyphenation. If the module or its pattern file is missing,
+# hyphenation is disabled gracefully (plain word-wrapping still works).
+try:
+    import hyphenator
+    hyphenator._load()  # force-load the pattern blob now so per-word calls can't fail on I/O
+    _HYPHEN_OK = True
+except Exception as _e:
+    print(f"hyphenator unavailable: {_e}")
+    _HYPHEN_OK = False
+
 LED_DUTY_CYCLE = 40
 INACTIVITY_TIMEOUT = 300
 
@@ -240,7 +250,13 @@ BOOK_DIR = "/books"
 # pagination/offsets. Set False for a ragged right edge.
 JUSTIFY_TEXT = True
 
-FONT_W_5X8 = 5 
+# Hyphenate words that overflow a line (Frank Liang's algorithm, on-device).
+# Fills lines more evenly and shrinks the gaps justification opens up. Only
+# applied within a page - a word is never split across a page boundary, so the
+# saved offset/remainder stays on whole-word boundaries. Requires hyphenator.py.
+HYPHENATE = True
+
+FONT_W_5X8 = 5
 FONT_H_5X8 = 8
 
 last_activity = time.monotonic()
@@ -382,8 +398,13 @@ def justify_line(text, max_chars):
     return "".join(out)
 
 
-def paginate_text(file_path, start_offset, remainder=b""):
-    """Paginate one page of text starting from offset with optional remainder."""
+def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
+    """Paginate one page of text starting from offset with optional remainder.
+
+    hyphenate=False skips hyphenation for speed when the page's *lines* are
+    thrown away and only next_offset is needed (e.g. the fast-advance skip loop).
+    Page boundaries stay on whole words either way, so the offset is still a
+    valid resume/render point."""
     try:
         with open(file_path, "rb") as f:
             f.seek(start_offset)
@@ -519,27 +540,47 @@ def paginate_text(file_path, start_offset, remainder=b""):
                         current_clean_text = appended
                         word_count += 1
                     else:
+                        # Word doesn't fit. Try to hyphenate a prefix onto this line
+                        # first - but never across a PAGE boundary (that would leave
+                        # half a word in the saved remainder). So only when the prefix
+                        # line won't be the page's last line; then the whole word is
+                        # consumed on this page and the offset stays whole-word.
+                        if (hyphenate and HYPHENATE and _HYPHEN_OK
+                                and line_count < LINES_PER_PAGE - 1):
+                            used = len(current_clean_text) + (1 if current_clean_text else 0)
+                            prefix, rest = hyphenator.hyphenate_split(word_clean, MAX_CHARS - used)
+                            if prefix:
+                                if current_clean_text:
+                                    line_out = current_clean_text + " " + prefix + "-"
+                                else:
+                                    line_out = prefix + "-"
+                                lines.append(line_out.encode("utf-8", "ignore"))
+                                line_count += 1
+                                current_clean_text = rest
+                                word_count += 1
+                                continue
+
                         lines.append(current_clean_text.encode("utf-8", "ignore"))
                         line_count += 1
-                        
+
                         if line_count >= LINES_PER_PAGE:
                             consumed_raw = words_raw[:word_count]
                             consumed_raw_str = " ".join(consumed_raw)
-                            
+
                             if len(consumed_raw) > 0 and word_count < len(words_raw):
                                 consumed_raw_str += " "
-                                
+
                             byte_idx = len(consumed_raw_str.encode("utf-8", "ignore"))
                             remainder = line_bytes[byte_idx:]
-                            
+
                             extra_skip = 0
                             while remainder.startswith(b' '):
                                 remainder = remainder[1:]
                                 extra_skip += 1
-                                
+
                             next_offset = pos + byte_idx + extra_skip
                             break
-                        
+
                         current_clean_text = word_clean
                         word_count += 1
                 
@@ -970,8 +1011,10 @@ while True:
                 FAST_ADVANCE_PAGES = 49  # Already advanced 1, so 49 more = 50 total
                 
                 for i in range(FAST_ADVANCE_PAGES):
-                    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                    
+                    # Skip hyphenation here: these pages are only used to advance
+                    # the offset, never rendered, so we don't pay for hyphenating them.
+                    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder, hyphenate=False)
+
                     if not lines or next_off <= current_offset:
                         break
                     
