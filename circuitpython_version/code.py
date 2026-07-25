@@ -548,12 +548,13 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                         if (hyphenate and HYPHENATE and _HYPHEN_OK
                                 and line_count < LINES_PER_PAGE - 1):
                             used = len(current_clean_text) + (1 if current_clean_text else 0)
-                            prefix, rest = hyphenator.hyphenate_split(word_clean, MAX_CHARS - used)
-                            if prefix:
+                            head, rest = hyphenator.hyphenate_split(word_clean, MAX_CHARS - used)
+                            if head:
+                                # head already includes its trailing hyphen (soft or existing)
                                 if current_clean_text:
-                                    line_out = current_clean_text + " " + prefix + "-"
+                                    line_out = current_clean_text + " " + head
                                 else:
-                                    line_out = prefix + "-"
+                                    line_out = head
                                 lines.append(line_out.encode("utf-8", "ignore"))
                                 line_count += 1
                                 current_clean_text = rest
