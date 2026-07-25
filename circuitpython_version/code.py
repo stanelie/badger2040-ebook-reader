@@ -390,7 +390,10 @@ def paginate_text(file_path, start_offset, remainder=b""):
             lines = []
             line_count = 0
             next_offset = -1
-            
+            # Persists across source lines so consecutive non-blank lines flow
+            # together as one paragraph (only a blank line ends a paragraph).
+            current_clean_text = ""
+
             while line_count < LINES_PER_PAGE:
                 pos = f.tell()
                 
@@ -403,12 +406,28 @@ def paginate_text(file_path, start_offset, remainder=b""):
                     line_bytes = f.readline()
                 
                 if not line_bytes:
+                    # EOF: flush the paragraph currently being built.
+                    if current_clean_text:
+                        lines.append(current_clean_text.encode("utf-8", "ignore"))
+                        line_count += 1
+                        current_clean_text = ""
                     next_offset = f.tell()
                     break
-                
+
                 line = line_bytes.rstrip(b"\r\n")
-                
+
                 if not line:
+                    # Blank line ends a paragraph: flush its last line first, then
+                    # emit the blank separator.
+                    if current_clean_text:
+                        lines.append(current_clean_text.encode("utf-8", "ignore"))
+                        line_count += 1
+                        current_clean_text = ""
+                        if line_count >= LINES_PER_PAGE:
+                            # Page filled by the paragraph tail; absorb this blank
+                            # line into the break (next page continues after it).
+                            next_offset = f.tell()
+                            break
                     lines.append(b"")
                     line_count += 1
                     if line_count >= LINES_PER_PAGE:
@@ -425,7 +444,6 @@ def paginate_text(file_path, start_offset, remainder=b""):
                         line_str_raw = ''.join(chr(b) if b < 128 else '?' for b in line)
                 
                 words_raw = line_str_raw.split(" ")
-                current_clean_text = ""
                 word_count = 0
                 
                 for raw_word in words_raw:
@@ -527,16 +545,18 @@ def paginate_text(file_path, start_offset, remainder=b""):
                 
                 if next_offset != -1:
                     break
-                
+
+                # End of this source line - do NOT flush current_clean_text; the
+                # paragraph continues on the next line. It gets flushed at a blank
+                # line, at EOF, or when the next line's words wrap it.
+
+            if next_offset == -1:
+                # Loop ended without an explicit page break (e.g. a pathological
+                # over-long token filled the page): flush any trailing text.
                 if current_clean_text:
                     lines.append(current_clean_text.encode("utf-8", "ignore"))
                     line_count += 1
-                
-                if line_count >= LINES_PER_PAGE:
-                    next_offset = f.tell()
-                    break
-            
-            if next_offset == -1:
+                    current_clean_text = ""
                 next_offset = f.tell()
             
             gc.collect()
