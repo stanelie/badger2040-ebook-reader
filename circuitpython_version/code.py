@@ -235,6 +235,11 @@ TEXT_WIDTH = WIDTH - TEXT_PADDING*2
 MAX_CHARS = TEXT_WIDTH // vga2_8x16.WIDTH
 BOOK_DIR = "/books"
 
+# Full-justify wrapped lines so the right margin is flush (monospace: pad
+# spaces between words). Purely a rendering choice - it does not affect
+# pagination/offsets. Set False for a ragged right edge.
+JUSTIFY_TEXT = True
+
 FONT_W_5X8 = 5 
 FONT_H_5X8 = 8
 
@@ -357,6 +362,26 @@ def get_storage_status():
 
 # ---------------- TEXT PROCESSING -----------------
 
+def justify_line(text, max_chars):
+    """Full-justify a single monospace line by distributing extra spaces
+    between words until it reaches max_chars. Extra spaces go to the left-most
+    gaps first. Returns text unchanged if it can't/shouldn't be justified."""
+    words = text.split(" ")
+    if len(words) < 2:
+        return text
+    need = max_chars - len(text)
+    if need <= 0:
+        return text
+    gaps = len(words) - 1
+    base, extra = divmod(need, gaps)
+    out = []
+    for i, w in enumerate(words[:-1]):
+        out.append(w)
+        out.append(" " * (1 + base + (1 if i < extra else 0)))
+    out.append(words[-1])
+    return "".join(out)
+
+
 def paginate_text(file_path, start_offset, remainder=b""):
     """Paginate one page of text starting from offset with optional remainder."""
     try:
@@ -411,8 +436,67 @@ def paginate_text(file_path, start_offset, remainder=b""):
                     word_clean = raw_word.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
                                .replace("\u2014", "-").replace("\u2013", "-").replace("…", "...")
 
+                    # --- Over-long word (wider than a full line): hard-break it into
+                    # MAX_CHARS-sized chunks instead of overflowing off the display.
+                    # We only page-break at whole-word boundaries, so the byte
+                    # offset/remainder accounting stays exact.
+                    if len(word_clean) > MAX_CHARS:
+                        # Flush any partial line first - the long word starts fresh.
+                        if current_clean_text:
+                            lines.append(current_clean_text.encode("utf-8", "ignore"))
+                            line_count += 1
+                            current_clean_text = ""
+                            if line_count >= LINES_PER_PAGE:
+                                consumed_raw = words_raw[:word_count]
+                                consumed_raw_str = " ".join(consumed_raw)
+                                if len(consumed_raw) > 0 and word_count < len(words_raw):
+                                    consumed_raw_str += " "
+                                byte_idx = len(consumed_raw_str.encode("utf-8", "ignore"))
+                                remainder = line_bytes[byte_idx:]
+                                extra_skip = 0
+                                while remainder.startswith(b' '):
+                                    remainder = remainder[1:]
+                                    extra_skip += 1
+                                next_offset = pos + byte_idx + extra_skip
+                                break
+
+                        chunks = [word_clean[c:c + MAX_CHARS]
+                                  for c in range(0, len(word_clean), MAX_CHARS)]
+
+                        # Place the whole word only if it fits in the lines left on
+                        # this page; otherwise defer it (unconsumed) to the next page.
+                        # On a fresh page it cannot fit anywhere, so place what we can
+                        # to guarantee forward progress.
+                        if line_count + len(chunks) <= LINES_PER_PAGE or line_count == 0:
+                            placed = 0
+                            for chunk in chunks[:-1]:
+                                if line_count >= LINES_PER_PAGE:
+                                    break
+                                lines.append(chunk.encode("utf-8", "ignore"))
+                                line_count += 1
+                                placed += 1
+                            if line_count < LINES_PER_PAGE and placed == len(chunks) - 1:
+                                current_clean_text = chunks[-1]
+                            else:
+                                current_clean_text = ""
+                            word_count += 1
+                            continue
+                        else:
+                            consumed_raw = words_raw[:word_count]
+                            consumed_raw_str = " ".join(consumed_raw)
+                            if len(consumed_raw) > 0 and word_count < len(words_raw):
+                                consumed_raw_str += " "
+                            byte_idx = len(consumed_raw_str.encode("utf-8", "ignore"))
+                            remainder = line_bytes[byte_idx:]
+                            extra_skip = 0
+                            while remainder.startswith(b' '):
+                                remainder = remainder[1:]
+                                extra_skip += 1
+                            next_offset = pos + byte_idx + extra_skip
+                            break
+
                     appended = current_clean_text + " " + word_clean if current_clean_text else word_clean
-                    
+
                     if len(appended) <= MAX_CHARS:
                         current_clean_text = appended
                         word_count += 1
@@ -525,12 +609,20 @@ def render_page_to_buffer(page_offset, page_remainder, target_rotated_buffer):
         lines, _, _ = paginate_text(text_file, page_offset, page_remainder)
         
         y = TEXT_PADDING
-        for line in lines:
+        n_lines = len(lines)
+        for i in range(n_lines):
+            line = lines[i]
             if line:
                 try:
                     text = line.decode("utf-8", "replace")
                     text = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
                                .replace("\u2014", "-").replace("\u2013", "-")
+                    # Justify only interior lines that are followed by more text
+                    # on this page. The last line of a paragraph (next line blank
+                    # or end of page) stays ragged; line 0 is skipped so a full
+                    # line never collides with the top-right battery indicator.
+                    if JUSTIFY_TEXT and i > 0 and i + 1 < n_lines and lines[i + 1]:
+                        text = justify_line(text, MAX_CHARS)
                     display.text(text, TEXT_PADDING, y, 1)
                 except:
                     pass
