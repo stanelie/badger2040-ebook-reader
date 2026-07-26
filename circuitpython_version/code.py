@@ -246,13 +246,17 @@ TEXT_PADDING = 2
 WIDTH = 296
 HEIGHT = 128
 TEXT_WIDTH = WIDTH - TEXT_PADDING*2
+# Vertical text offset. The glyph box has a few empty rows above the caps, so
+# starting at 0 (flush to the top) still looks like it has headroom, and it
+# lets the bottom line's descenders clear the screen edge instead of clipping.
+TEXT_TOP = 0
 # Fit a fixed number of lines and distribute the height so the page fills the
 # screen (leaving a little leading between lines) rather than packing lines
 # tightly at box height and leaving a gap at the bottom. Pair the font size so
 # its box height is about LINE_HEIGHT (the size-13 Literata box is 15px, ~1px
 # taller than the 14px pitch, which only the tall glyphs like parens use).
 LINES_PER_PAGE = 9
-LINE_HEIGHT = (HEIGHT - TEXT_PADDING) // LINES_PER_PAGE
+LINE_HEIGHT = (HEIGHT - TEXT_TOP) // LINES_PER_PAGE
 BOOK_DIR = "/books"
 
 # Full-justify wrapped lines so the right margin is flush (monospace: pad
@@ -706,7 +710,7 @@ def render_page_to_buffer(page_offset, page_remainder, target_rotated_buffer):
     try:
         lines, _, _ = paginate_text(text_file, page_offset, page_remainder)
         
-        y = TEXT_PADDING
+        y = TEXT_TOP
         n_lines = len(lines)
         for i in range(n_lines):
             line = lines[i]
