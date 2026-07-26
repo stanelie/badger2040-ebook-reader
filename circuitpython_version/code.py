@@ -246,9 +246,13 @@ TEXT_PADDING = 2
 WIDTH = 296
 HEIGHT = 128
 TEXT_WIDTH = WIDTH - TEXT_PADDING*2
-# Line metrics come from the proportional font (pixels, not character cells).
-LINE_HEIGHT = FONT.box_h
-LINES_PER_PAGE = (HEIGHT - TEXT_PADDING) // LINE_HEIGHT
+# Fit a fixed number of lines and distribute the height so the page fills the
+# screen (leaving a little leading between lines) rather than packing lines
+# tightly at box height and leaving a gap at the bottom. Pair the font size so
+# its box height is about LINE_HEIGHT (the size-13 Literata box is 15px, ~1px
+# taller than the 14px pitch, which only the tall glyphs like parens use).
+LINES_PER_PAGE = 9
+LINE_HEIGHT = (HEIGHT - TEXT_PADDING) // LINES_PER_PAGE
 BOOK_DIR = "/books"
 
 # Full-justify wrapped lines so the right margin is flush (monospace: pad
