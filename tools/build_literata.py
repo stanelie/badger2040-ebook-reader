@@ -8,7 +8,7 @@ a different size or a different font.
     # Literata is SIL OFL - https://github.com/google/fonts/tree/main/ofl/literata
     curl -L -o Literata-var.ttf \
       "https://raw.githubusercontent.com/google/fonts/main/ofl/literata/Literata%5Bopsz%2Cwght%5D.ttf"
-    python tools/build_literata.py 16 108   # size=16px, threshold=108
+    python tools/build_literata.py 12 108   # size=12px, threshold=108 (9 lines/page)
 
 `literata.pf` format:
   magic 4 = b"PFN1"; box_h; baseline; first_char; count; space_advance
@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TTF = os.environ.get("LITERATA_TTF", os.path.join(HERE, "Literata-var.ttf"))
 OUT = os.path.join(HERE, "..", "circuitpython_version", "literata.pf")
 
-SIZE = int(sys.argv[1]) if len(sys.argv) > 1 else 16
+SIZE = int(sys.argv[1]) if len(sys.argv) > 1 else 12  # 12px -> box_h 13 -> 9 lines/page
 THRESH = int(sys.argv[2]) if len(sys.argv) > 2 else 108
 FIRST, LAST = 0x20, 0x7E
 CHARS = [chr(c) for c in range(FIRST, LAST + 1)]
