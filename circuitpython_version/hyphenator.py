@@ -136,31 +136,30 @@ def hyphenate(word):
     return pieces
 
 
-def hyphenate_split(word, space_left):
+def hyphenate_split(word, space_left, measure=len):
     """Split `word` for line-wrapping. Return (head, rest) where `head` is the
     exact text to place on the current line - it already includes its trailing
     hyphen, whether that hyphen was added by Liang's algorithm or was already in
-    the word - and `rest` continues on the next line. `head` fits within
-    `space_left` characters and is the longest such legal break, or (None, None)
-    if the word can't/shouldn't be broken here."""
-    if space_left < 3:
-        return None, None
-
+    the word - and `rest` continues on the next line. `head` must satisfy
+    measure(head) <= space_left and is the longest such legal break, or
+    (None, None) if the word can't/shouldn't be broken here. `measure` lets the
+    caller budget in pixels (proportional font) instead of characters."""
     if "-" in word:
         # Already-hyphenated word (also covers em/en-dashes normalised to "-"):
         # break right after an existing hyphen. The hyphen is already in the
         # text, so `head` is just the prefix up to and including it - no dash is
         # added. Keep >=2 chars on each side of the break.
-        best = None
+        best_head = None
+        best_rest = None
         for i in range(2, len(word) - 2):
             if word[i] == "-":
                 head = word[:i + 1]
-                if len(head) > space_left:
+                if measure(head) > space_left:
                     break
-                best = head
-        if best is None:
+                best_head, best_rest = head, word[i + 1:]
+        if best_head is None:
             return None, None
-        return best, word[len(best):]
+        return best_head, best_rest
 
     # All-letter word: Liang soft hyphenation, which adds a trailing "-".
     if len(word) < 5:
@@ -168,14 +167,15 @@ def hyphenate_split(word, space_left):
     pieces = hyphenate(word)
     if len(pieces) < 2:
         return None, None
-    best = None
+    best_head = None
+    best_rest = None
     acc = ""
     for idx in range(len(pieces) - 1):
         acc += pieces[idx]
-        if len(acc) + 1 <= space_left:  # acc + trailing "-"
-            best = acc
-        else:
+        head = acc + "-"
+        if measure(head) > space_left:
             break
-    if best is None:
+        best_head, best_rest = head, word[len(acc):]
+    if best_head is None:
         return None, None
-    return best + "-", word[len(best):]
+    return best_head, best_rest

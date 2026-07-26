@@ -28,6 +28,12 @@ except Exception as _e:
     print(f"hyphenator unavailable: {_e}")
     _HYPHEN_OK = False
 
+# Proportional reading font (Literata). Required for the reading view - the
+# layout engine measures line fit in pixels via FONT. The picker and status
+# bars still use the built-in monospace font.
+import propfont
+FONT = propfont.PropFont("literata.pf")
+
 LED_DUTY_CYCLE = 40
 INACTIVITY_TIMEOUT = 300
 
@@ -236,13 +242,13 @@ def force_save_state():
     pages_since_save = 0
 
 # ---------------- CONFIG -----------------
-LINES_PER_PAGE = 9
-LINE_HEIGHT = vga2_8x16.HEIGHT - 2 
 TEXT_PADDING = 2
 WIDTH = 296
 HEIGHT = 128
 TEXT_WIDTH = WIDTH - TEXT_PADDING*2
-MAX_CHARS = TEXT_WIDTH // vga2_8x16.WIDTH
+# Line metrics come from the proportional font (pixels, not character cells).
+LINE_HEIGHT = FONT.box_h
+LINES_PER_PAGE = (HEIGHT - TEXT_PADDING) // LINE_HEIGHT
 BOOK_DIR = "/books"
 
 # Full-justify wrapped lines so the right margin is flush (monospace: pad
@@ -378,24 +384,21 @@ def get_storage_status():
 
 # ---------------- TEXT PROCESSING -----------------
 
-def justify_line(text, max_chars):
-    """Full-justify a single monospace line by distributing extra spaces
-    between words until it reaches max_chars. Extra spaces go to the left-most
-    gaps first. Returns text unchanged if it can't/shouldn't be justified."""
-    words = text.split(" ")
-    if len(words) < 2:
-        return text
-    need = max_chars - len(text)
-    if need <= 0:
-        return text
-    gaps = len(words) - 1
-    base, extra = divmod(need, gaps)
-    out = []
-    for i, w in enumerate(words[:-1]):
-        out.append(w)
-        out.append(" " * (1 + base + (1 if i < extra else 0)))
-    out.append(words[-1])
-    return "".join(out)
+def _pixel_chunks(word, max_px):
+    """Break an over-long word (wider than a full line) into pieces that each
+    fit within max_px pixels. Used only as a fallback for tokens with no
+    hyphenation points that still overflow (e.g. long URLs)."""
+    chunks = []
+    cur = ""
+    for ch in word:
+        if cur and FONT.text_width(cur + ch) > max_px:
+            chunks.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
@@ -475,11 +478,11 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                     word_clean = raw_word.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
                                .replace("\u2014", "-").replace("\u2013", "-").replace("…", "...")
 
-                    # --- Over-long word (wider than a full line): hard-break it into
-                    # MAX_CHARS-sized chunks instead of overflowing off the display.
-                    # We only page-break at whole-word boundaries, so the byte
-                    # offset/remainder accounting stays exact.
-                    if len(word_clean) > MAX_CHARS:
+                    # --- Over-long word (wider than a full line): hard-break it
+                    # into pixel-sized chunks instead of overflowing off the
+                    # display. We only page-break at whole-word boundaries, so the
+                    # byte offset/remainder accounting stays exact.
+                    if FONT.text_width(word_clean) > TEXT_WIDTH:
                         # Flush any partial line first - the long word starts fresh.
                         if current_clean_text:
                             lines.append(current_clean_text.encode("utf-8", "ignore"))
@@ -499,8 +502,7 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                                 next_offset = pos + byte_idx + extra_skip
                                 break
 
-                        chunks = [word_clean[c:c + MAX_CHARS]
-                                  for c in range(0, len(word_clean), MAX_CHARS)]
+                        chunks = _pixel_chunks(word_clean, TEXT_WIDTH)
 
                         # Place the whole word only if it fits in the lines left on
                         # this page; otherwise defer it (unconsumed) to the next page.
@@ -536,7 +538,7 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
 
                     appended = current_clean_text + " " + word_clean if current_clean_text else word_clean
 
-                    if len(appended) <= MAX_CHARS:
+                    if FONT.text_width(appended) <= TEXT_WIDTH:
                         current_clean_text = appended
                         word_count += 1
                     else:
@@ -547,8 +549,8 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                         # consumed on this page and the offset stays whole-word.
                         if (hyphenate and HYPHENATE and _HYPHEN_OK
                                 and line_count < LINES_PER_PAGE - 1):
-                            used = len(current_clean_text) + (1 if current_clean_text else 0)
-                            head, rest = hyphenator.hyphenate_split(word_clean, MAX_CHARS - used)
+                            used = FONT.text_width(current_clean_text) + (FONT.space_w if current_clean_text else 0)
+                            head, rest = hyphenator.hyphenate_split(word_clean, TEXT_WIDTH - used, FONT.text_width)
                             if head:
                                 # head already includes its trailing hyphen (soft or existing)
                                 if current_clean_text:
@@ -680,12 +682,15 @@ def render_page_to_buffer(page_offset, page_remainder, target_rotated_buffer):
                     text = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
                                .replace("\u2014", "-").replace("\u2013", "-")
                     # Justify only interior lines that are followed by more text
-                    # on this page. The last line of a paragraph (next line blank
-                    # or end of page) stays ragged; line 0 is skipped so a full
-                    # line never collides with the top-right battery indicator.
+                    # on this page (widen the spaces to the full text width). The
+                    # last line of a paragraph (next line blank or end of page)
+                    # stays ragged; line 0 is skipped so a full line never
+                    # collides with the top-right battery indicator.
                     if JUSTIFY_TEXT and i > 0 and i + 1 < n_lines and lines[i + 1]:
-                        text = justify_line(text, MAX_CHARS)
-                    display.text(text, TEXT_PADDING, y, 1)
+                        FONT.draw_justified(temp_fb, text, TEXT_PADDING, y, 1,
+                                            TEXT_WIDTH)
+                    else:
+                        FONT.draw(temp_fb, text, TEXT_PADDING, y, 1)
                 except:
                     pass
             y += LINE_HEIGHT

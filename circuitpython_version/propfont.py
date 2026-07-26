@@ -1,0 +1,74 @@
+"""Minimal proportional 1-bit bitmap font renderer for the Badger reader.
+
+Loads a `.pf` font (see build_literata.py for the format) as one small bytes
+blob and blits glyphs into an adafruit_framebuf.FrameBuffer. Also provides pixel
+width metrics so the layout engine can wrap/justify/hyphenate in pixels instead
+of character counts.
+"""
+
+
+class PropFont:
+    def __init__(self, path):
+        d = open(path, "rb").read()
+        if d[:4] != b"PFN1":
+            raise ValueError("bad font file")
+        self.d = d
+        self.box_h = d[4]
+        self.baseline = d[5]
+        self.first = d[6]
+        self.count = d[7]
+        self.space_w = d[8]
+        self.rec0 = 9
+        self.bmp0 = self.rec0 + self.count * 4
+        self._qmark = ord("?")
+
+    def _rec(self, ch):
+        idx = ord(ch) - self.first
+        if idx < 0 or idx >= self.count:
+            idx = self._qmark - self.first
+        r = self.rec0 + idx * 4
+        d = self.d
+        return d[r], d[r + 1], self.bmp0 + (d[r + 2] | (d[r + 3] << 8))
+
+    def char_width(self, ch):
+        return self._rec(ch)[0]
+
+    def text_width(self, s):
+        w = 0
+        for ch in s:
+            w += self._rec(ch)[0]
+        return w
+
+    def draw(self, fb, s, x, y, color=1, extra_each=0, extra_first=0):
+        """Blit `s` at (x, y) top-left. `extra_each` px is added to every space
+        advance and `extra_first` more spaces get one extra px (for justified
+        line filling). Returns the final pen x."""
+        d = self.d
+        box_h = self.box_h
+        first_n = extra_first
+        for ch in s:
+            adv, bw, off = self._rec(ch)
+            rb = (bw + 7) // 8
+            for ry in range(box_h):
+                base = off + ry * rb
+                yy = y + ry
+                for cx in range(bw):
+                    if d[base + (cx >> 3)] & (0x80 >> (cx & 7)):
+                        fb.pixel(x + cx, yy, color)
+            x += adv
+            if ch == " ":
+                x += extra_each
+                if first_n > 0:
+                    x += 1
+                    first_n -= 1
+        return x
+
+    def draw_justified(self, fb, s, x, y, color, target_width):
+        """Draw `s` stretched to `target_width` px by widening its spaces."""
+        spaces = s.count(" ")
+        extra = target_width - self.text_width(s)
+        if spaces == 0 or extra <= 0:
+            return self.draw(fb, s, x, y, color)
+        base = extra // spaces
+        rem = extra - base * spaces
+        return self.draw(fb, s, x, y, color, extra_each=base, extra_first=rem)
