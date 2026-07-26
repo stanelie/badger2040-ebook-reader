@@ -8,7 +8,7 @@ of character counts.
 
 
 class PropFont:
-    def __init__(self, path):
+    def __init__(self, path, min_space_ratio=0.30):
         d = open(path, "rb").read()
         if d[:4] != b"PFN1":
             raise ValueError("bad font file")
@@ -17,10 +17,14 @@ class PropFont:
         self.baseline = d[5]
         self.first = d[6]
         self.count = d[7]
-        self.space_w = d[8]
+        # The baked space advance can be tiny at small sizes, which makes packed
+        # and justified lines run together. Enforce a visible minimum scaled to
+        # the font height so it holds across sizes.
+        self.space_w = max(d[8], round(self.box_h * min_space_ratio))
         self.rec0 = 9
         self.bmp0 = self.rec0 + self.count * 4
         self._qmark = ord("?")
+        self._space_idx = ord(" ") - self.first
 
     def _rec(self, ch):
         idx = ord(ch) - self.first
@@ -28,7 +32,8 @@ class PropFont:
             idx = self._qmark - self.first
         r = self.rec0 + idx * 4
         d = self.d
-        return d[r], d[r + 1], self.bmp0 + (d[r + 2] | (d[r + 3] << 8))
+        adv = self.space_w if idx == self._space_idx else d[r]
+        return adv, d[r + 1], self.bmp0 + (d[r + 2] | (d[r + 3] << 8))
 
     def char_width(self, ch):
         return self._rec(ch)[0]
