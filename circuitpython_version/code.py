@@ -615,41 +615,71 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
         gc.collect()
         return [], start_offset, b""
 
+def _paragraph_start(file_path, pos):
+    """Return the start of the paragraph at/just before byte `pos` (the position
+    after the previous blank line), or 0 / `pos` if none is found nearby. Used to
+    align the back-scan so its re-paginated chain lines up with the real one."""
+    if pos <= 0:
+        return 0
+    try:
+        start = max(0, pos - 1200)
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            chunk = f.read(pos - start)
+        i = chunk.rfind(b"\n\n")
+        if i >= 0:
+            return start + i + 2
+        return 0 if start == 0 else pos
+    except Exception:
+        return pos
+
+
 def find_previous_page(target_offset):
-    """Find the page position that leads to target_offset by scanning backwards."""
+    """Find a page position roughly one page before target_offset by scanning
+    backwards. This is only the fallback used when the RAM page-history is empty
+    (e.g. right after opening/resuming a book); normal back-navigation pops the
+    exact history. Because re-paginated page boundaries can be phase-shifted from
+    the real chain, an exact match isn't guaranteed - so on a miss we return
+    whichever nearby boundary is closest to a full page back, never a boundary
+    only a few lines up."""
     global text_file
-    
+
     if target_offset == 0:
         return 0, b""
-    
-    # Search from before the target
-    search_start = max(0, target_offset - 3000)  # ~3KB back covers 2-3 pages
-    
+
+    # Start at a paragraph boundary before the target for better alignment.
+    search_start = _paragraph_start(text_file, max(0, target_offset - 3000))
+
     offset = search_start
     remainder = b""
-    
     prev_offset = 0
     prev_remainder = b""
-    
+
     while offset < target_offset:
-        lines, next_offset, next_remainder = paginate_text(text_file, offset, remainder)
-        
+        # hyphenate=False keeps this scan fast (no Liang calls). The boundaries
+        # then differ slightly from the real (hyphenated) chain, so we rarely
+        # land exactly on target - that's fine, we just want ~one page back.
+        lines, next_offset, next_remainder = paginate_text(
+            text_file, offset, remainder, hyphenate=False)
+
         if not lines or next_offset <= offset:
             break
-        
+
         if next_offset >= target_offset:
-            # Current (offset, remainder) is the page that leads to target
-            return offset, remainder
-        
+            if next_offset == target_offset:
+                return offset, remainder  # exact previous page
+            # Overshoot: target sits inside this page. Return the boundary before
+            # it so "back" always moves ~a full page, never just a few lines.
+            return prev_offset, prev_remainder
+
         prev_offset = offset
         prev_remainder = remainder
         offset = next_offset
         remainder = next_remainder
-    
-    # If search_start was already a valid page boundary
+
     if search_start == 0:
         return 0, b""
-    
+
     return prev_offset, prev_remainder
 
 # ---------------- RENDERING -----------------
