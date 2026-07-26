@@ -28,11 +28,28 @@ except Exception as _e:
     print(f"hyphenator unavailable: {_e}")
     _HYPHEN_OK = False
 
-# Proportional reading font (Literata). Required for the reading view - the
-# layout engine measures line fit in pixels via FONT. The picker and status
-# bars still use the built-in monospace font.
+# Proportional reading fonts. The B button cycles through whichever of these
+# are present on the device. The layout engine measures line fit in pixels via
+# the active FONT. The picker and status bars still use the built-in monospace.
 import propfont
-FONT = propfont.PropFont("literata.pf")
+
+FONT_FILES = [
+    ("literata.pf", "Literata"),
+    ("lexenddeca.pf", "Lexend Deca"),
+    ("oldmono.pf", "Mono 8x16"),
+]
+AVAILABLE_FONTS = []
+for _fp, _fn in FONT_FILES:
+    try:
+        open(_fp, "rb").close()
+        AVAILABLE_FONTS.append((_fp, _fn))
+    except Exception:
+        pass
+if not AVAILABLE_FONTS:
+    AVAILABLE_FONTS = [("literata.pf", "Literata")]  # last resort; errors if truly missing
+
+font_index = 0
+FONT = propfont.PropFont(AVAILABLE_FONTS[0][0])  # real selection loaded at startup from NVRAM
 
 LED_DUTY_CYCLE = 40
 INACTIVITY_TIMEOUT = 300
@@ -89,6 +106,30 @@ ENTRY_PATH_MAX = 198
 
 # Max books we can store: (4096 - 8) / 256 = 15
 MAX_BOOKS = 15
+
+# Global settings live past the book-entry region (entries end at 8+15*256=3848).
+NVM_O_FONT_MAGIC = 3900
+NVM_O_FONT_INDEX = 3901
+FONT_SETTINGS_MAGIC = 0x5A
+
+
+def load_font_index():
+    """Read the saved font choice from NVRAM (0 if unset)."""
+    try:
+        if bytes(NVM[NVM_O_FONT_MAGIC:NVM_O_FONT_MAGIC + 1])[0] == FONT_SETTINGS_MAGIC:
+            return bytes(NVM[NVM_O_FONT_INDEX:NVM_O_FONT_INDEX + 1])[0]
+    except Exception:
+        pass
+    return 0
+
+
+def save_font_index(idx):
+    """Persist the font choice to NVRAM."""
+    try:
+        NVM[NVM_O_FONT_MAGIC:NVM_O_FONT_MAGIC + 1] = bytes([FONT_SETTINGS_MAGIC])
+        NVM[NVM_O_FONT_INDEX:NVM_O_FONT_INDEX + 1] = bytes([idx & 0xFF])
+    except Exception as e:
+        print(f"save_font_index error: {e}")
 
 def _get_entry_base(index):
     """Get base offset for a book entry"""
@@ -983,6 +1024,15 @@ if not text_file:
 # Clear history for fresh start
 history_clear()
 
+# Apply the saved font choice
+font_index = load_font_index() % len(AVAILABLE_FONTS)
+if font_index != 0:
+    try:
+        FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+    except Exception as e:
+        print(f"font load failed: {e}")
+        font_index = 0
+
 # Render current page
 render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
 
@@ -1145,6 +1195,38 @@ while True:
             
             maybe_save_state()  # Periodic save only
         
+        gc.collect()
+        led_off()
+
+    # FONT TOGGLE (B): cycle the reading font, persist it, re-render the page.
+    if button_pressed(buttons["b"]):
+        led_on()
+        while button_pressed(buttons["b"]):
+            time.sleep(0.05)
+        last_activity = time.monotonic()
+
+        if len(AVAILABLE_FONTS) > 1:
+            font_index = (font_index + 1) % len(AVAILABLE_FONTS)
+            try:
+                FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+                save_font_index(font_index)
+                gc.collect()
+                # Re-render the current page in the new font. Its metrics differ
+                # so the page reflows, but the byte offset stays a valid start.
+                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+                # The pre-rendered next page used the old font; rebuild it.
+                lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
+                if lines and next_off > current_offset:
+                    next_page_offset = next_off
+                    next_page_remainder = next_rem
+                    render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
+                    next_page_ready = True
+                else:
+                    next_page_ready = False
+            except Exception as e:
+                print(f"font switch error: {e}")
+
         gc.collect()
         led_off()
 
