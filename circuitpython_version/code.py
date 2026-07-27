@@ -436,17 +436,26 @@ def get_storage_status():
 def _pixel_chunks(word, max_px):
     """Break an over-long word (wider than a full line) into pieces that each
     fit within max_px pixels. Used only as a fallback for tokens with no
-    hyphenation points that still overflow (e.g. long URLs)."""
+    hyphenation points that still overflow (e.g. long URLs).
+
+    Tracks width with per-character increments and only joins at a chunk
+    boundary - the old version called FONT.text_width(cur + ch) every
+    character, which both re-measured the whole growing string each time
+    (O(n^2)) and re-allocated a new concatenated string each time."""
     chunks = []
-    cur = ""
+    cur_chars = []
+    cur_w = 0
     for ch in word:
-        if cur and FONT.text_width(cur + ch) > max_px:
-            chunks.append(cur)
-            cur = ch
+        cw = FONT.char_width(ch)
+        if cur_chars and cur_w + cw > max_px:
+            chunks.append("".join(cur_chars))
+            cur_chars = [ch]
+            cur_w = cw
         else:
-            cur += ch
-    if cur:
-        chunks.append(cur)
+            cur_chars.append(ch)
+            cur_w += cw
+    if cur_chars:
+        chunks.append("".join(cur_chars))
     return chunks
 
 
@@ -463,9 +472,18 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
             lines = []
             line_count = 0
             next_offset = -1
-            # Persists across source lines so consecutive non-blank lines flow
-            # together as one paragraph (only a blank line ends a paragraph).
-            current_clean_text = ""
+            # The line currently being built, as a list of words plus its
+            # running pixel width - NOT a string rebuilt via concatenation on
+            # every word. Persists across source lines so consecutive non-blank
+            # lines flow together as one paragraph (only a blank line ends a
+            # paragraph). current_width always equals
+            # FONT.text_width(" ".join(current_words)) exactly; the join only
+            # happens once, when a line is flushed to `lines`. Rebuilding a
+            # growing string on every word (the old approach) was a major
+            # source of RP2040 heap fragmentation - see hyphenator.py's
+            # _lookup docstring for the same issue in the hyphenation search.
+            current_words = []
+            current_width = 0
 
             while line_count < LINES_PER_PAGE:
                 pos = f.tell()
@@ -480,10 +498,11 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                 
                 if not line_bytes:
                     # EOF: flush the paragraph currently being built.
-                    if current_clean_text:
-                        lines.append(current_clean_text.encode("utf-8", "ignore"))
+                    if current_words:
+                        lines.append(" ".join(current_words).encode("utf-8", "ignore"))
                         line_count += 1
-                        current_clean_text = ""
+                        current_words = []
+                        current_width = 0
                     next_offset = f.tell()
                     break
 
@@ -492,10 +511,11 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                 if not line:
                     # Blank line ends a paragraph: flush its last line first, then
                     # emit the blank separator.
-                    if current_clean_text:
-                        lines.append(current_clean_text.encode("utf-8", "ignore"))
+                    if current_words:
+                        lines.append(" ".join(current_words).encode("utf-8", "ignore"))
                         line_count += 1
-                        current_clean_text = ""
+                        current_words = []
+                        current_width = 0
                         if line_count >= LINES_PER_PAGE:
                             # Page filled by the paragraph tail; absorb this blank
                             # line into the break (next page continues after it).
@@ -533,10 +553,11 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                     # byte offset/remainder accounting stays exact.
                     if FONT.text_width(word_clean) > TEXT_WIDTH:
                         # Flush any partial line first - the long word starts fresh.
-                        if current_clean_text:
-                            lines.append(current_clean_text.encode("utf-8", "ignore"))
+                        if current_words:
+                            lines.append(" ".join(current_words).encode("utf-8", "ignore"))
                             line_count += 1
-                            current_clean_text = ""
+                            current_words = []
+                            current_width = 0
                             if line_count >= LINES_PER_PAGE:
                                 consumed_raw = words_raw[:word_count]
                                 consumed_raw_str = " ".join(consumed_raw)
@@ -566,9 +587,11 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                                 line_count += 1
                                 placed += 1
                             if line_count < LINES_PER_PAGE and placed == len(chunks) - 1:
-                                current_clean_text = chunks[-1]
+                                current_words = [chunks[-1]]
+                                current_width = FONT.text_width(chunks[-1])
                             else:
-                                current_clean_text = ""
+                                current_words = []
+                                current_width = 0
                             word_count += 1
                             continue
                         else:
@@ -585,10 +608,12 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                             next_offset = pos + byte_idx + extra_skip
                             break
 
-                    appended = current_clean_text + " " + word_clean if current_clean_text else word_clean
+                    word_w = FONT.text_width(word_clean)
+                    prospective = current_width + (FONT.space_w + word_w if current_words else word_w)
 
-                    if FONT.text_width(appended) <= TEXT_WIDTH:
-                        current_clean_text = appended
+                    if prospective <= TEXT_WIDTH:
+                        current_words.append(word_clean)
+                        current_width = prospective
                         word_count += 1
                     else:
                         # Word doesn't fit. Try to hyphenate a prefix onto this line
@@ -598,21 +623,23 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                         # consumed on this page and the offset stays whole-word.
                         if (hyphenate and HYPHENATE and _HYPHEN_OK
                                 and line_count < LINES_PER_PAGE - 1):
-                            used = FONT.text_width(current_clean_text) + (FONT.space_w if current_clean_text else 0)
+                            used = current_width + (FONT.space_w if current_words else 0)
                             head, rest = hyphenator.hyphenate_split(word_clean, TEXT_WIDTH - used, FONT.text_width)
                             if head:
                                 # head already includes its trailing hyphen (soft or existing)
-                                if current_clean_text:
-                                    line_out = current_clean_text + " " + head
+                                if current_words:
+                                    current_words.append(head)
+                                    line_out = " ".join(current_words)
                                 else:
                                     line_out = head
                                 lines.append(line_out.encode("utf-8", "ignore"))
                                 line_count += 1
-                                current_clean_text = rest
+                                current_words = [rest]
+                                current_width = FONT.text_width(rest)
                                 word_count += 1
                                 continue
 
-                        lines.append(current_clean_text.encode("utf-8", "ignore"))
+                        lines.append(" ".join(current_words).encode("utf-8", "ignore"))
                         line_count += 1
 
                         if line_count >= LINES_PER_PAGE:
@@ -633,23 +660,25 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                             next_offset = pos + byte_idx + extra_skip
                             break
 
-                        current_clean_text = word_clean
+                        current_words = [word_clean]
+                        current_width = word_w
                         word_count += 1
                 
                 if next_offset != -1:
                     break
 
-                # End of this source line - do NOT flush current_clean_text; the
+                # End of this source line - do NOT flush current_words; the
                 # paragraph continues on the next line. It gets flushed at a blank
                 # line, at EOF, or when the next line's words wrap it.
 
             if next_offset == -1:
                 # Loop ended without an explicit page break (e.g. a pathological
                 # over-long token filled the page): flush any trailing text.
-                if current_clean_text:
-                    lines.append(current_clean_text.encode("utf-8", "ignore"))
+                if current_words:
+                    lines.append(" ".join(current_words).encode("utf-8", "ignore"))
                     line_count += 1
-                    current_clean_text = ""
+                    current_words = []
+                    current_width = 0
                 next_offset = f.tell()
             
             gc.collect()
@@ -757,9 +786,11 @@ def render_page_to_buffer(page_offset, page_remainder, target_rotated_buffer):
             line = lines[i]
             if line:
                 try:
+                    # Already smart-quote/dash-cleaned in paginate_text (every
+                    # byte here comes from word_clean, which went through that
+                    # replace() chain once already) - no need to redo it per
+                    # render, which just adds allocation churn for no effect.
                     text = line.decode("utf-8", "replace")
-                    text = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
-                               .replace("\u2014", "-").replace("\u2013", "-")
                     # Justify only interior lines that are followed by more text
                     # on this page (widen the spaces to the full text width). The
                     # last line of a paragraph (next line blank or end of page)

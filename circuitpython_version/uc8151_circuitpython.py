@@ -175,7 +175,14 @@ class UC8151:
         # Store the original dimensions as physical dimensions
         self.physical_width = width
         self.physical_height = height
-        
+
+        # Reused scratch buffer for _rotate_framebuffer, allocated lazily on
+        # first use instead of a fresh bytearray every call - this method runs
+        # on every page render (twice per page turn: current + pre-rendered
+        # next), so re-allocating its ~4.7KB output buffer each time added
+        # needless churn to an already memory-constrained device.
+        self._rotate_scratch = None
+
         # Swap width/height for user's framebuffer if rotation is 90 or 270
         if rotation in (90, 270):
             self.width = height
@@ -662,16 +669,32 @@ class UC8151:
         """
         Rotate the framebuffer - optimized for 270° rotation.
         For 270°: processes in chunks for better performance.
+
+        Reuses a persistent scratch buffer (self._rotate_scratch) instead of
+        allocating a fresh ~4.7KB bytearray every call. This method runs on
+        every page render (twice per page turn: current + pre-rendered next),
+        so the repeated allocation was a source of memory churn. Safe to
+        share one buffer across calls: every caller synchronously copies out
+        or transmits (via spi.write(), itself a blocking call) the returned
+        buffer's contents before this method can be called again - this is a
+        single-threaded, cooperative runtime with no background DMA left
+        in flight after spi.write() returns.
         """
         if self.rotation == 0:
             return fb
-        
+
+        size = self.physical_width * self.physical_height // 8
+        if self._rotate_scratch is None or len(self._rotate_scratch) != size:
+            self._rotate_scratch = bytearray(size)
+        rotated = self._rotate_scratch
+        for i in range(size):
+            rotated[i] = 0
+
         if self.rotation == 270:
             # Optimized 270° rotation for Badger 2040
             # 270° rotation: (x, y) -> (y, width - 1 - x)
             # Process 8 pixels at a time when possible
-            rotated = bytearray(self.physical_width * self.physical_height // 8)
-            
+
             # Process each source byte
             for src_byte_idx in range(len(fb)):
                 if fb[src_byte_idx] == 0:
@@ -702,8 +725,8 @@ class UC8151:
             
             return rotated
         
-        # Fallback for other rotations (90, 180)
-        rotated = bytearray(self.physical_width * self.physical_height // 8)
+        # Fallback for other rotations (90, 180) - `rotated` (the shared,
+        # already-zeroed scratch buffer) is set up above.
         fb_view = memoryview(fb)
         rot_view = memoryview(rotated)
         
