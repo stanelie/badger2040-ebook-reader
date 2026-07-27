@@ -42,25 +42,25 @@ def _load():
     return _BLOB
 
 
-def _cmp_key(blob, ls, le, key):
-    """Compare the letters-only key of pattern line blob[ls:le] against `key`
-    (bytes), lexicographically, without allocating. Returns -1, 0 or 1."""
-    ki = 0
-    klen = len(key)
+def _cmp_key(blob, ls, le, kbuf, ks, ke):
+    """Compare the letters-only key of pattern line blob[ls:le] against
+    kbuf[ks:ke], lexicographically, without allocating (no slice of either
+    buffer is ever materialized). Returns -1, 0 or 1."""
+    ki = ks
     p = ls
     while p < le:
         c = blob[p]
         if 48 <= c <= 57:   # skip digits - they aren't part of the key
             p += 1
             continue
-        if ki >= klen:
+        if ki >= ke:
             return 1        # line key longer, key is a prefix of it
-        kc = key[ki]
+        kc = kbuf[ki]
         if c != kc:
             return -1 if c < kc else 1
         ki += 1
         p += 1
-    return 0 if ki == klen else -1
+    return 0 if ki == ke else -1
 
 
 def _points_at(blob, ls, le):
@@ -77,9 +77,16 @@ def _points_at(blob, ls, le):
     return pts
 
 
-def _lookup(key):
+def _lookup(kbuf, ks, ke):
     """Binary-search the sorted, newline-delimited blob for a pattern whose
-    letters-only key equals `key` (bytes). Return its digit vector or None."""
+    letters-only key equals kbuf[ks:ke]. Return its digit vector or None.
+
+    Takes a buffer + range instead of a pre-sliced key so the caller never
+    allocates a new bytes object per candidate substring - hyphenate() tries
+    O(word_length * _LETTERS_MAX) substrings per word, and materializing each
+    one was generating enough short-lived garbage to fragment the RP2040 heap
+    over a reading session (observed as a MemoryError much later, in an
+    unrelated large allocation like the display's framebuffer rotation)."""
     blob = _BLOB
     lo = 0
     hi = len(blob)
@@ -89,7 +96,7 @@ def _lookup(key):
         le = blob.find(b"\n", mid)
         if le < 0:
             le = len(blob)
-        c = _cmp_key(blob, ls, le, key)
+        c = _cmp_key(blob, ls, le, kbuf, ks, ke)
         if c == 0:
             return _points_at(blob, ls, le)
         if c < 0:
@@ -120,7 +127,7 @@ def hyphenate(word):
         for i in range(n):
             top = min(i + _LETTERS_MAX, n)
             for j in range(i + 1, top + 1):
-                pts = _lookup(wb[i:j])
+                pts = _lookup(wb, i, j)
                 if pts:
                     for k in range(len(pts)):
                         if points[i + k] < pts[k]:
