@@ -34,9 +34,9 @@ except Exception as _e:
 import propfont
 
 FONT_FILES = [
+    ("oldmono.pf", "Mono 8x16"),     # the original reader font (default)
     ("literata.pf", "Literata"),
     ("lexenddeca.pf", "Lexend Deca"),
-    ("oldmono.pf", "Mono 8x16"),
 ]
 AVAILABLE_FONTS = []
 for _fp, _fn in FONT_FILES:

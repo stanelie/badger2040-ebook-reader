@@ -1,10 +1,12 @@
 """Host-side tool: convert a TTF/OTF into the reader's compact 1-bit
 proportional bitmap font (.pf). Needs Pillow. Runs on a desktop, not the Badger.
 
-    python tools/build_font.py <font.ttf> <out.pf> [size=13] [threshold=108]
+    python tools/build_font.py <font.ttf> <out.pf> [size=13] [threshold=108] [weight=400]
 
-For a variable font it selects weight 400 (Regular) and, if the font has an
-optical-size axis, sets it to the pixel size; other axes keep their default.
+For a variable font it selects the given weight (400 = Regular) and, if the
+font has an optical-size axis, sets it to the pixel size; other axes keep their
+default. A slightly heavier weight (e.g. 500) rasterises thin sans stems more
+cleanly to 1-bit at small sizes.
 
 All bundled fonts are open-licensed (SIL OFL). Sources:
   Literata     https://github.com/google/fonts/tree/main/ofl/literata
@@ -22,6 +24,7 @@ TTF = sys.argv[1]
 OUT = sys.argv[2]
 SIZE = int(sys.argv[3]) if len(sys.argv) > 3 else 13
 THRESH = int(sys.argv[4]) if len(sys.argv) > 4 else 108
+WEIGHT = int(sys.argv[5]) if len(sys.argv) > 5 else 400
 
 FIRST, LAST = 0x20, 0x7E
 CHARS = [chr(c) for c in range(FIRST, LAST + 1)]
@@ -35,7 +38,7 @@ try:
         nm = nm.decode("latin-1") if isinstance(nm, bytes) else str(nm)
         nm = nm.lower()
         if "weight" in nm:
-            vals.append(400)
+            vals.append(WEIGHT)
         elif "optical" in nm:
             vals.append(SIZE)
         else:
