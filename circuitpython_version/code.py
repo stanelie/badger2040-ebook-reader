@@ -367,6 +367,40 @@ raw_working_buffer = bytearray(display.width * display.height // 8)
 current_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
 next_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
 
+# One persistent FrameBuffer wrapping raw_working_buffer, reused for every
+# screen render (reading pages, the book picker, reset/sleep messages) instead
+# of constructing a fresh wrapper each time. Only one is ever needed live at
+# once (the reader draws one screen, transmits it, then draws the next).
+_scratch_fb = adafruit_framebuf.FrameBuffer(
+    raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
+)
+
+
+class _ScratchFrame:
+    """Context manager for drawing a screen: clears the shared scratch
+    framebuffer (a single native .fill(0) call instead of a ~4700-iteration
+    Python loop) and points display.fb/raw_fb at it so the existing
+    display.text()/fill_rect()/etc. helpers draw into it, restoring the
+    previous fb/raw_fb on exit.
+
+        with _ScratchFrame() as temp_fb:
+            display.text("Hello", 5, 5, 1)
+            temp_fb.fill_rect(0, 0, 10, 10, 1)
+    """
+    def __enter__(self):
+        self.old_fb = display.fb
+        self.old_raw_fb = display.raw_fb
+        _scratch_fb.fill(0)
+        display.fb = _scratch_fb
+        display.raw_fb = raw_working_buffer
+        return _scratch_fb
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        display.fb = self.old_fb
+        display.raw_fb = self.old_raw_fb
+        return False
+
+
 next_page_ready = False
 next_page_offset = 0
 next_page_remainder = b""
@@ -765,77 +799,63 @@ def render_page_to_buffer(page_offset, page_remainder, target_rotated_buffer):
     """Render a page to the target buffer."""
     global text_file
     
-    for i in range(len(raw_working_buffer)):
-        raw_working_buffer[i] = 0
-        
-    temp_fb = adafruit_framebuf.FrameBuffer(
-        raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
-    )
-    
-    old_fb = display.fb
-    old_raw_fb = display.raw_fb
-    display.fb = temp_fb
-    display.raw_fb = raw_working_buffer
-    
     try:
-        lines, _, _ = paginate_text(text_file, page_offset, page_remainder)
-        
-        y = TEXT_TOP
-        n_lines = len(lines)
-        for i in range(n_lines):
-            line = lines[i]
-            if line:
-                try:
-                    # Already smart-quote/dash-cleaned in paginate_text (every
-                    # byte here comes from word_clean, which went through that
-                    # replace() chain once already) - no need to redo it per
-                    # render, which just adds allocation churn for no effect.
-                    text = line.decode("utf-8", "replace")
-                    # Justify only interior lines that are followed by more text
-                    # on this page (widen the spaces to the full text width). The
-                    # last line of a paragraph (next line blank or end of page)
-                    # stays ragged; line 0 is skipped so a full line never
-                    # collides with the top-right battery indicator.
-                    if JUSTIFY_TEXT and i > 0 and i + 1 < n_lines and lines[i + 1]:
-                        FONT.draw_justified(temp_fb, text, TEXT_PADDING, y, 1,
-                                            TEXT_WIDTH)
-                    else:
-                        FONT.draw(temp_fb, text, TEXT_PADDING, y, 1)
-                except:
-                    pass
-            y += LINE_HEIGHT
-            
-        # Battery indicator
-        pct, charging = get_battery_status()
-        if charging:
-             status_text = "USB"
-        elif pct >= 0:
-             status_text = f"{pct}"
-        else:
-             status_text = ""
-        
-        if status_text:
-            STATUS_X = WIDTH - (len(status_text) * FONT_W_5X8) - TEXT_PADDING
-            STATUS_Y = TEXT_PADDING 
-            temp_fb.text(status_text, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
-        
-        # Progress bar
-        try:
-            file_stats = os.stat(text_file)
-            total_size = file_stats[6]
-            
-            if total_size > 0:
-                progress_ratio = page_offset / total_size
-                progress_ratio = max(0.0, min(1.0, progress_ratio)) 
-                progress_width = int(progress_ratio * WIDTH)
-                progress_width = max(1, min(WIDTH, progress_width)) 
-                temp_fb.fill_rect(0, HEIGHT - 1, progress_width, 1, 1)
-        except:
-            pass
-            
+        with _ScratchFrame() as temp_fb:
+            lines, _, _ = paginate_text(text_file, page_offset, page_remainder)
+
+            y = TEXT_TOP
+            n_lines = len(lines)
+            for i in range(n_lines):
+                line = lines[i]
+                if line:
+                    try:
+                        # Already smart-quote/dash-cleaned in paginate_text (every
+                        # byte here comes from word_clean, which went through that
+                        # replace() chain once already) - no need to redo it per
+                        # render, which just adds allocation churn for no effect.
+                        text = line.decode("utf-8", "replace")
+                        # Justify only interior lines that are followed by more text
+                        # on this page (widen the spaces to the full text width). The
+                        # last line of a paragraph (next line blank or end of page)
+                        # stays ragged; line 0 is skipped so a full line never
+                        # collides with the top-right battery indicator.
+                        if JUSTIFY_TEXT and i > 0 and i + 1 < n_lines and lines[i + 1]:
+                            FONT.draw_justified(temp_fb, text, TEXT_PADDING, y, 1,
+                                                TEXT_WIDTH)
+                        else:
+                            FONT.draw(temp_fb, text, TEXT_PADDING, y, 1)
+                    except:
+                        pass
+                y += LINE_HEIGHT
+
+            # Battery indicator
+            pct, charging = get_battery_status()
+            if charging:
+                 status_text = "USB"
+            elif pct >= 0:
+                 status_text = f"{pct}"
+            else:
+                 status_text = ""
+
+            if status_text:
+                STATUS_X = WIDTH - (len(status_text) * FONT_W_5X8) - TEXT_PADDING
+                STATUS_Y = TEXT_PADDING
+                temp_fb.text(status_text, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
+
+            # Progress bar
+            try:
+                file_stats = os.stat(text_file)
+                total_size = file_stats[6]
+
+                if total_size > 0:
+                    progress_ratio = page_offset / total_size
+                    progress_ratio = max(0.0, min(1.0, progress_ratio))
+                    progress_width = int(progress_ratio * WIDTH)
+                    progress_width = max(1, min(WIDTH, progress_width))
+                    temp_fb.fill_rect(0, HEIGHT - 1, progress_width, 1, 1)
+            except:
+                pass
     finally:
-        display.fb = old_fb
-        display.raw_fb = old_raw_fb
         gc.collect()
 
     rotated_data = display._rotate_framebuffer(raw_working_buffer)
@@ -899,46 +919,32 @@ def file_picker():
                 if book_idx >= len(books):
                     break
                 
-                for i in range(len(raw_working_buffer)): 
-                    raw_working_buffer[i] = 0
-                temp_fb = adafruit_framebuf.FrameBuffer(raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB)
-                
-                old_fb = display.fb
-                old_raw_fb = display.raw_fb
-                display.fb = temp_fb
-                display.raw_fb = raw_working_buffer
-                
-                try:
-                    temp_fb.fill(0)
+                with _ScratchFrame() as temp_fb:
                     display.text("Select Book:", 5, 5, 1)
-                    
+
                     for i in range(per_page):
                         idx = offset + i
                         if idx >= len(books): break
                         name = books[idx].split("/")[-1]
                         if len(name) > 33: name = name[:30] + "..."
                         y = 25 + i * 16
-                        
+
                         if i == sel_idx:
                             display.fb.fill_rect(2, y-2, WIDTH-4, 16, 1)
                             display.text(name, 5, y, 0)
                         else:
                             display.text(name, 5, y, 1)
-                    
+
                     if len(books) > per_page:
                         page = offset // per_page + 1
                         total = (len(books) + per_page - 1) // per_page
                         display.text(f"{page}/{total}", WIDTH - (vga2_8x16.WIDTH * 5), HEIGHT - vga2_8x16.HEIGHT - 10, 1)
-                        
+
                     storage_status = get_storage_status()
                     STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING
-                    STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING 
+                    STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING
                     temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
-                    
-                finally:
-                    display.fb = old_fb
-                    display.raw_fb = old_raw_fb
-                
+
                 rotated = display._rotate_framebuffer(raw_working_buffer)
                 buffer_copy = bytearray(len(rotated))
                 for i in range(len(rotated)):
@@ -1273,19 +1279,10 @@ while True:
             # Show warning after 3 seconds that reset is coming
             if press_duration > 3.0 and not reset_warning_shown:
                 # Render reset warning screen
-                for i in range(len(raw_working_buffer)): 
-                    raw_working_buffer[i] = 0
-                temp_fb = adafruit_framebuf.FrameBuffer(
-                    raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
-                )
-                old_fb, old_raw_fb = display.fb, display.raw_fb
-                display.fb, display.raw_fb = temp_fb, raw_working_buffer
-                try:
+                with _ScratchFrame():
                     display.text("FACTORY RESET", 70, 30, 1)
                     display.text("Keep holding to reset...", 30, 55, 1)
                     display.text("Release to cancel", 55, 80, 1)
-                finally:
-                    display.fb, display.raw_fb = old_fb, old_raw_fb
                 rotated = display._rotate_framebuffer(raw_working_buffer)
                 update_display_fast(rotated, blocking=True)
                 reset_warning_shown = True
@@ -1296,17 +1293,8 @@ while True:
             led_on()
             
             # Show resetting message
-            for i in range(len(raw_working_buffer)): 
-                raw_working_buffer[i] = 0
-            temp_fb = adafruit_framebuf.FrameBuffer(
-                raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
-            )
-            old_fb, old_raw_fb = display.fb, display.raw_fb
-            display.fb, display.raw_fb = temp_fb, raw_working_buffer
-            try:
+            with _ScratchFrame():
                 display.text("RESETTING...", 80, 55, 1)
-            finally:
-                display.fb, display.raw_fb = old_fb, old_raw_fb
             rotated = display._rotate_framebuffer(raw_working_buffer)
             update_display_fast(rotated, blocking=True)
             
@@ -1330,18 +1318,9 @@ while True:
                 pass
             
             # Show complete message
-            for i in range(len(raw_working_buffer)): 
-                raw_working_buffer[i] = 0
-            temp_fb = adafruit_framebuf.FrameBuffer(
-                raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
-            )
-            old_fb, old_raw_fb = display.fb, display.raw_fb
-            display.fb, display.raw_fb = temp_fb, raw_working_buffer
-            try:
+            with _ScratchFrame():
                 display.text("RESET COMPLETE", 65, 45, 1)
                 display.text("Restarting...", 80, 70, 1)
-            finally:
-                display.fb, display.raw_fb = old_fb, old_raw_fb
             rotated = display._rotate_framebuffer(raw_working_buffer)
             update_display_fast(rotated, blocking=True)
             
@@ -1415,18 +1394,9 @@ while True:
             force_save_state()  # Critical: save before power down
             
             # Display sleep message
-            for i in range(len(raw_working_buffer)): 
-                raw_working_buffer[i] = 0
-            temp_fb = adafruit_framebuf.FrameBuffer(
-                raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
-            )
-            old_fb, old_raw_fb = display.fb, display.raw_fb
-            display.fb, display.raw_fb = temp_fb, raw_working_buffer
-            try:
+            with _ScratchFrame():
                 display.text("Sleeping...", 110, 30, 1)
                 display.text("press any key to wake", 60, 90, 1)
-            finally:
-                display.fb, display.raw_fb = old_fb, old_raw_fb
             
             rotated = display._rotate_framebuffer(raw_working_buffer)
             old_rot = display.rotation

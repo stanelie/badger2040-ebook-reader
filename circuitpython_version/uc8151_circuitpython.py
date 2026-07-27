@@ -183,6 +183,11 @@ class UC8151:
         # needless churn to an already memory-constrained device.
         self._rotate_scratch = None
 
+        # Reused 1-byte scratch for write()'s command byte (and the rare
+        # single-int-data case) - every command sent to the panel otherwise
+        # allocated a fresh bytes([cmd]) object just to hold one byte.
+        self._cmd_buf = bytearray(1)
+
         # Swap width/height for user's framebuffer if rotation is 90 or 270
         if rotation in (90, 270):
             self.width = height
@@ -414,12 +419,15 @@ class UC8151:
             if self.dc:
                 self.dc.value = False  # Command mode
             
-            # Write command
-            self.spi.write(bytes([cmd]))
-            
+            # Write command (reused 1-byte buffer instead of a fresh bytes([cmd])
+            # allocation - this runs for every single command sent to the panel)
+            self._cmd_buf[0] = cmd
+            self.spi.write(self._cmd_buf)
+
             if data:
                 if isinstance(data, int):
-                    data = bytes([data])
+                    self._cmd_buf[0] = data
+                    data = self._cmd_buf
                 if isinstance(data, list):
                     data = bytes(data)
                 if self.dc:
