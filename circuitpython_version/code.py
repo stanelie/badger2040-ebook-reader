@@ -260,6 +260,11 @@ def state_load_last_book():
 def state_save_current():
     """Save current reading position to NVRAM"""
     global current_offset, current_remainder, text_file
+    if not text_file:
+        # No book open yet (e.g. the startup picker timed out and went to
+        # sleep). Saving here would add an entry with an empty path, which
+        # would then show up as a phantom book.
+        return
     state_save(current_offset, current_remainder, text_file)
 
 # ---------------- SAVE FREQUENCY CONTROL -----------------
@@ -968,7 +973,7 @@ def list_books():
     return sorted(books)
 
 def file_picker():
-    global first_display_update
+    global first_display_update, last_activity
     books = list_books()
     
     if not books:
@@ -1060,8 +1065,9 @@ def file_picker():
             led_off()
         
         if button_pressed(buttons["down"]):
+            last_activity = time.monotonic()
             selected = (selected + 1) % len(books)
-            
+
             if selected < offset or selected >= offset + per_page:
                 offset = (selected // per_page) * per_page
             else:
@@ -1074,8 +1080,9 @@ def file_picker():
             time.sleep(0.15)
             
         elif button_pressed(buttons["up"]):
+            last_activity = time.monotonic()
             selected = (selected - 1) % len(books)
-            
+
             if selected < offset or selected >= offset + per_page:
                 offset = (selected // per_page) * per_page
             else:
@@ -1088,10 +1095,17 @@ def file_picker():
             time.sleep(0.15)
             
         elif button_pressed(buttons["a"]):
+            last_activity = time.monotonic()
             while button_pressed(buttons["a"]):
                 time.sleep(0.05)
             return books[selected]
-        
+
+        # The picker runs its own polling loop, so it has to honour the
+        # inactivity timeout itself - otherwise leaving the device sitting in
+        # the picker would keep it awake until the battery ran down.
+        if check_inactivity():
+            return None
+
         time.sleep(0.05)
 
 # ---------------- NAVIGATION -----------------
@@ -1291,6 +1305,9 @@ def open_picker():
 
     new_book = file_picker()
     if not new_book:
+        # Nothing chosen (no books, or the picker timed out) - make sure the
+        # activity LED doesn't stay lit.
+        led_off()
         return
 
     led_on()
@@ -1354,6 +1371,32 @@ def enter_sleep():
     force_save_state()  # Critical: save before power down
     show_message(("Sleeping...", 110, 30), ("press any key to wake", 60, 90))
     board.ENABLE_DIO.value = False
+
+
+def check_inactivity():
+    """Power down if the user has been idle past the timeout.
+
+    Called from every loop that can hold the device for a long time - the main
+    reading loop and the book picker. The picker runs its own polling loop, so
+    without this the device would stay awake indefinitely with the picker open.
+
+    Returns True if it went to sleep. In practice cutting ENABLE_DIO powers the
+    board down, so callers rarely see that return.
+    """
+    global last_activity
+
+    if time.monotonic() - last_activity <= INACTIVITY_TIMEOUT:
+        return False
+
+    _, is_charging = get_battery_status()
+    if is_charging:
+        last_activity = time.monotonic()
+        return False
+
+    led_on()
+    enter_sleep()
+    led_off()
+    return True
 
 
 # ---------------- MAIN -----------------
@@ -1502,12 +1545,4 @@ while True:
         handle_menu_button()
 
     # INACTIVITY TIMEOUT
-    if time.monotonic() - last_activity > INACTIVITY_TIMEOUT:
-        _, is_charging = get_battery_status()
-
-        if is_charging:
-            last_activity = time.monotonic()
-        else:
-            led_on()
-            enter_sleep()
-            led_off()
+    check_inactivity()

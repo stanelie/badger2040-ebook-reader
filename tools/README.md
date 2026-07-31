@@ -19,6 +19,7 @@ Only the standard library is needed (no Pillow, no hardware):
 ```
 python3 tools/test_reflow.py          # text layout + pagination
 python3 tools/test_quickback.py       # page-navigation state machine
+python3 tools/test_power.py           # sleep / inactivity behaviour
 ```
 
 Both run against every installed `.pf` font by default; pass a font filename to
@@ -56,6 +57,17 @@ the shipping code.
 This is why the navigation state transitions live in `nav_*` functions instead
 of inline in the main loop — the main loop only polls buttons and times presses,
 which is the part that genuinely needs hardware.
+
+### test_power.py
+
+Battery life depends on the device actually powering down when left alone, and
+any loop that polls buttons on its own has to honour the timeout itself. Drives
+the real `check_inactivity()` with the clock and battery stubbed: stays awake
+before the timeout, sleeps once after it, defers while charging, and resets on a
+button press. Also checks that sleeping with no book open doesn't write a
+phantom NVRAM entry, and structurally that `file_picker` still calls
+`check_inactivity` and refreshes `last_activity` — the picker runs its own
+polling loop, and originally did neither.
 
 ## Font builders
 

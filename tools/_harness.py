@@ -35,6 +35,7 @@ TEXT_WIDTH = WIDTH - TEXT_PADDING * 2
 LINES_PER_PAGE = 9
 
 PAGE_HISTORY_SIZE = 10
+INACTIVITY_TIMEOUT_DEFAULT = 300
 
 # The functions worth testing offline: everything that decides what text lands
 # on a page, plus the navigation state machine (which buffer holds which page).
@@ -44,6 +45,7 @@ EXTRACT = (
     "history_push", "history_pop", "history_peek", "history_clear",
     "prerender_next", "prerender_prev",
     "nav_page_down", "nav_fast_advance", "nav_page_up",
+    "check_inactivity", "state_save_current",
 )
 
 
