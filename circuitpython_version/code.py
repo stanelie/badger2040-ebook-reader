@@ -335,6 +335,15 @@ def history_pop():
         return page_history.pop()
     return None
 
+def history_peek():
+    """Look at the previous position WITHOUT consuming it - used to pre-render
+    the previous page. The actual back navigation still pops it, and because
+    both read the same entry the pre-rendered page always matches where back
+    will actually go."""
+    if page_history:
+        return page_history[-1]
+    return None
+
 def history_clear():
     """Clear page history"""
     global page_history
@@ -366,6 +375,30 @@ display.enable_quick_updates(True)
 raw_working_buffer = bytearray(display.width * display.height // 8)
 current_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
 next_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
+
+# Quick-back: a third page buffer holding the PREVIOUS page, so pressing up is
+# instant like pressing down already is. Costs one more screen buffer (~4.7KB)
+# but no extra rendering: on a page turn the page being left is already drawn,
+# so it becomes the previous page just by rotating which buffer is which (and
+# vice-versa when going back). Allocated once at startup while the heap is
+# still unfragmented; if there isn't room, quick-back simply stays off and
+# back-navigation renders on demand as before.
+QUICK_BACK = True
+try:
+    if QUICK_BACK:
+        prev_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
+        QUICK_BACK_OK = True
+    else:
+        prev_rotated_buffer = None
+        QUICK_BACK_OK = False
+except MemoryError:
+    print("quick-back disabled: not enough memory for a third page buffer")
+    prev_rotated_buffer = None
+    QUICK_BACK_OK = False
+
+prev_page_ready = False
+prev_page_offset = 0
+prev_page_remainder = b""
 
 # One persistent FrameBuffer wrapping raw_working_buffer, reused for every
 # screen render (reading pages, the book picker, reset/sleep messages) instead
@@ -872,6 +905,43 @@ def update_display_fast(rotated_buffer, blocking=True):
 def wait_for_display():
     display.wait_ready()
 
+
+def prerender_next():
+    """Render the page AFTER the current one into next_rotated_buffer, so a
+    forward press can swap to it instantly."""
+    global next_page_ready, next_page_offset, next_page_remainder
+    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
+    if lines and next_off > current_offset:
+        next_page_offset = next_off
+        next_page_remainder = next_rem
+        render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
+        next_page_ready = True
+    else:
+        next_page_ready = False
+
+
+def prerender_prev():
+    """Render the page BEFORE the current one into prev_rotated_buffer, so a
+    back press can swap to it instantly. Uses the same source the back press
+    will use (page history first, then the find_previous_page fallback), so
+    the pre-rendered page always matches where back actually goes."""
+    global prev_page_ready, prev_page_offset, prev_page_remainder
+    prev_page_ready = False
+    if not QUICK_BACK_OK or current_offset <= 0:
+        return
+    pos = history_peek()
+    if pos is None:
+        pos = find_previous_page(current_offset)
+    if not pos:
+        return
+    p_off, p_rem = pos
+    if p_off == current_offset and p_rem == current_remainder:
+        return  # degenerate - would not move
+    prev_page_offset = p_off
+    prev_page_remainder = p_rem
+    render_page_to_buffer(p_off, p_rem, prev_rotated_buffer)
+    prev_page_ready = True
+
 # ---------------- FILE PICKER -----------------
 def list_books():
     books = []
@@ -1082,15 +1152,9 @@ if first_display_update:
 else:
     update_display_fast(current_rotated_buffer)
 
-# Pre-render next page
-lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-if lines and next_off > current_offset:
-    next_page_offset = next_off
-    next_page_remainder = next_rem
-    render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
-    next_page_ready = True
-else:
-    next_page_ready = False
+# Pre-render the neighbouring pages so the first press either way is instant
+prerender_next()
+prerender_prev()
 
 # Save initial state
 force_save_state()
@@ -1109,12 +1173,24 @@ while True:
         
         # IMMEDIATE VISUAL FEEDBACK: Advance and display first page instantly
         page_advanced = False
+        prev_came_free = False
         if next_page_ready:
             # Save current position to history
             history_push(current_offset, current_remainder)
-            
-            # Swap buffers and update display immediately
-            current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
+
+            leaving_offset, leaving_remainder = current_offset, current_remainder
+            if QUICK_BACK_OK:
+                # Rotate all three: the page being left is already drawn, so it
+                # becomes the previous page for free; the pre-rendered next
+                # becomes current; the stale prev buffer is recycled as the new
+                # next. No extra rendering is needed for quick-back here.
+                prev_rotated_buffer, current_rotated_buffer, next_rotated_buffer = (
+                    current_rotated_buffer, next_rotated_buffer, prev_rotated_buffer)
+                prev_page_offset, prev_page_remainder = leaving_offset, leaving_remainder
+                prev_page_ready = True
+                prev_came_free = True
+            else:
+                current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
             current_offset = next_page_offset
             current_remainder = next_page_remainder
             update_display_fast(current_rotated_buffer)
@@ -1125,6 +1201,15 @@ while True:
             lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
             if lines and next_off > current_offset:
                 history_push(current_offset, current_remainder)
+                leaving_offset, leaving_remainder = current_offset, current_remainder
+                if QUICK_BACK_OK:
+                    # Keep the drawn page we're leaving as the previous page and
+                    # draw the new page into the recycled prev buffer.
+                    prev_rotated_buffer, current_rotated_buffer = (
+                        current_rotated_buffer, prev_rotated_buffer)
+                    prev_page_offset, prev_page_remainder = leaving_offset, leaving_remainder
+                    prev_page_ready = True
+                    prev_came_free = True
                 current_offset = next_off
                 current_remainder = next_rem
                 render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
@@ -1159,43 +1244,23 @@ while True:
                 
                 render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
                 update_display_fast(current_rotated_buffer)
-                
-                # Pre-render next
-                lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                if lines and next_off > current_offset:
-                    next_page_offset = next_off
-                    next_page_remainder = next_rem
-                    render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
-                    next_page_ready = True
-                else:
-                    next_page_ready = False
-                
+
+                # Jumped far, so the buffered previous page is no longer adjacent
+                prerender_next()
+                prerender_prev()
+
                 force_save_state()  # Always save after fast advance
             else:
-                # Short press: single page already advanced, just pre-render next
-                if update_display_fast(current_rotated_buffer, blocking=False):
-                    # Pre-render next page while display updates
-                    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                    if lines and next_off > current_offset:
-                        next_page_offset = next_off
-                        next_page_remainder = next_rem
-                        render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
-                        next_page_ready = True
-                    else:
-                        next_page_ready = False
-                    
+                # Short press: single page already advanced, just pre-render the
+                # neighbours (the previous page came free from the buffer
+                # rotation above, so it doesn't need re-rendering).
+                nonblocking = update_display_fast(current_rotated_buffer, blocking=False)
+                prerender_next()
+                if not prev_came_free:
+                    prerender_prev()
+                if nonblocking:
                     wait_for_display()
-                else:
-                    # Display update was blocking, pre-render now
-                    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                    if lines and next_off > current_offset:
-                        next_page_offset = next_off
-                        next_page_remainder = next_rem
-                        render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
-                        next_page_ready = True
-                    else:
-                        next_page_ready = False
-                
+
                 maybe_save_state()  # Periodic save only
         
         led_off()
@@ -1210,26 +1275,35 @@ while True:
         if current_offset > 0:
             # Try to get previous page from history
             prev = history_pop()
-            
-            if prev:
-                current_offset, current_remainder = prev
-            else:
+
+            if not prev:
                 # Calculate previous page
-                current_offset, current_remainder = find_previous_page(current_offset)
-            
-            render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-            update_display_fast(current_rotated_buffer)
-            
-            # Pre-render next page
-            lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-            if lines and next_off > current_offset:
-                next_page_offset = next_off
-                next_page_remainder = next_rem
-                render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
+                prev = find_previous_page(current_offset)
+
+            next_came_free = False
+            if (QUICK_BACK_OK and prev_page_ready
+                    and prev_page_offset == prev[0]
+                    and prev_page_remainder == prev[1]):
+                # QUICK BACK: the previous page is already drawn, so just rotate.
+                # The page being left is already drawn too, so it becomes the
+                # next page for free; the stale next buffer is recycled as prev.
+                next_rotated_buffer, current_rotated_buffer, prev_rotated_buffer = (
+                    current_rotated_buffer, prev_rotated_buffer, next_rotated_buffer)
+                next_page_offset, next_page_remainder = current_offset, current_remainder
                 next_page_ready = True
+                next_came_free = True
+                current_offset, current_remainder = prev
+                prev_page_ready = False
+                update_display_fast(current_rotated_buffer)
             else:
-                next_page_ready = False
-            
+                current_offset, current_remainder = prev
+                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+
+            if not next_came_free:
+                prerender_next()
+            prerender_prev()
+
             maybe_save_state()  # Periodic save only
         
         gc.collect()
@@ -1252,15 +1326,9 @@ while True:
                 # so the page reflows, but the byte offset stays a valid start.
                 render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
                 update_display_fast(current_rotated_buffer)
-                # The pre-rendered next page used the old font; rebuild it.
-                lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                if lines and next_off > current_offset:
-                    next_page_offset = next_off
-                    next_page_remainder = next_rem
-                    render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
-                    next_page_ready = True
-                else:
-                    next_page_ready = False
+                # The buffered neighbours were drawn in the old font; rebuild both.
+                prerender_next()
+                prerender_prev()
             except Exception as e:
                 print(f"font switch error: {e}")
 
@@ -1342,6 +1410,9 @@ while True:
             saved_next_ready = next_page_ready
             saved_next_offset = next_page_offset
             saved_next_remainder = next_page_remainder
+            saved_prev_ready = prev_page_ready
+            saved_prev_offset = prev_page_offset
+            saved_prev_remainder = prev_page_remainder
             
             new_book = file_picker()
             
@@ -1356,27 +1427,24 @@ while True:
                     
                     render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
                     update_display_fast(current_rotated_buffer)
-                    
-                    # Pre-render next
-                    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-                    if lines and next_off > current_offset:
-                        next_page_offset = next_off
-                        next_page_remainder = next_rem
-                        render_page_to_buffer(next_page_offset, next_page_remainder, next_rotated_buffer)
-                        next_page_ready = True
-                    else:
-                        next_page_ready = False
-                    
+
+                    prerender_next()
+                    prerender_prev()
+
                     force_save_state()  # Save new book position
                     gc.collect()
                 else:
-                    # Same book - restore
+                    # Same book - restore (the picker draws through its own
+                    # buffers, so the neighbour page images are still valid)
                     current_offset = saved_offset
                     current_remainder = saved_remainder
                     next_page_ready = saved_next_ready
                     next_page_offset = saved_next_offset
                     next_page_remainder = saved_next_remainder
-                    
+                    prev_page_ready = saved_prev_ready
+                    prev_page_offset = saved_prev_offset
+                    prev_page_remainder = saved_prev_remainder
+
                     render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
                     update_display_fast(current_rotated_buffer)
                     gc.collect()
