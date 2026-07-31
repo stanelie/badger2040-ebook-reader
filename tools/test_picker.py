@@ -87,16 +87,42 @@ def test_select_button_checked_first():
     print("  [ok] select button is checked before up/down")
 
 
-def test_no_per_row_page_buffers():
-    """The old picker pre-rendered a full-page copy per selectable row - up to
-    six 4,736-byte buffers held at once."""
+def test_selection_moves_are_prerendered():
+    """Moving the selection must be a buffer swap, not a re-render.
+
+    Rendering on demand was tried and reverted: rotating the framebuffer is the
+    slowest loop in the project, so paying it on every keypress made the picker
+    take about a second per row. The rows of the current page are pre-rendered
+    instead, and only rebuilt when the visible page changes.
+    """
+    node, seg = picker_source()
+    assert "selection_buffers" in seg, "picker no longer caches rendered rows"
+
+    # _draw_book_list must only be called while rebuilding the page cache,
+    # never from the button-handling path.
+    draw_calls = [c for c in ast.walk(node)
+                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                  and c.func.id == "_draw_book_list"]
+    assert draw_calls, "picker never renders the list"
+
+    for call in draw_calls:
+        # the enclosing statement must be inside the `offset != page_start`
+        # rebuild block, which is guarded by a comparison against page_start
+        enclosing = [nd for nd in ast.walk(node)
+                     if isinstance(nd, ast.If) and any(call is c for c in ast.walk(nd))]
+        guards = " ".join(ast.dump(nd.test) for nd in enclosing)
+        assert "page_start" in guards, (
+            "_draw_book_list is reachable outside the page-cache rebuild, so "
+            "moving the selection would re-render (slow)")
+    print("  [ok] selection moves swap a pre-rendered buffer (no re-render)")
+
+
+def test_page_cache_is_bounded():
+    """The cache holds at most one screen buffer per visible row."""
     _, seg = picker_source()
-    assert "selection_buffers" not in seg, (
-        "picker still builds a list of per-row page buffers (~28KB)")
-    assert "bytearray(" not in seg, (
-        "picker allocates a bytearray per redraw; it should reuse the shared "
-        "scratch frame and the driver's rotation buffer")
-    print("  [ok] no per-row page buffers (~28KB of allocations gone)")
+    assert "min(per_page, len(books) - offset)" in seg, (
+        "page cache is not bounded to the visible rows")
+    print("  [ok] page cache bounded to per_page rows (~28KB max, freed on exit)")
 
 
 def main():
@@ -104,7 +130,8 @@ def main():
     test_paging_matches_old_behaviour()
     test_selection_wraps_both_ways()
     test_select_button_checked_first()
-    test_no_per_row_page_buffers()
+    test_selection_moves_are_prerendered()
+    test_page_cache_is_bounded()
     print("\nALL PICKER CHECKS PASSED")
     return 0
 

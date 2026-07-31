@@ -699,37 +699,68 @@ class UC8151:
             rotated[i] = 0
 
         if self.rotation == 270:
-            # Optimized 270° rotation for Badger 2040
-            # 270° rotation: (x, y) -> (y, width - 1 - x)
-            # Process 8 pixels at a time when possible
+            # 270 degree rotation: (x, y) -> (y, width - 1 - x)
+            #
+            # This runs on every page render and every picker redraw, and it is
+            # the slowest pure-Python loop in the project, so the per-pixel work
+            # is kept to an OR and a subtraction. When both widths are a
+            # multiple of 8 (they are on the Badger: 296 and 128) the addressing
+            # collapses nicely:
+            #
+            #   dst_idx  = (width-1-src_x) * physical_width + src_y
+            #   dst_byte = (width-1-src_x) * (physical_width//8) + src_y//8
+            #   dst_bit  = 7 - (src_y & 7)
+            #
+            # physical_width*n is a multiple of 8, so the destination BIT
+            # depends only on src_y - it is constant for a whole source row.
+            # And stepping one pixel right in the source steps one whole row
+            # down in the destination, so the destination byte index just
+            # decreases by a fixed stride. That removes the per-pixel divide,
+            # modulo and multiply the previous version did.
+            width = self.width
+            height = self.height
+            phys_w = self.physical_width
 
-            # Process each source byte
+            if width % 8 == 0 and phys_w % 8 == 0:
+                src_row_bytes = width >> 3
+                dst_stride = phys_w >> 3
+                last_col = (width - 1) * dst_stride
+                bit_masks = (0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01)
+
+                for src_y in range(height):
+                    row_base = src_y * src_row_bytes
+                    mask = 0x80 >> (src_y & 7)          # constant for the row
+                    base0 = last_col + (src_y >> 3)
+
+                    for bx in range(src_row_bytes):
+                        byte_val = fb[row_base + bx]
+                        if not byte_val:
+                            continue                     # skip blank bytes
+                        base = base0 - (bx << 3) * dst_stride
+                        for bit_mask in bit_masks:
+                            if byte_val & bit_mask:
+                                rotated[base] |= mask
+                            base -= dst_stride
+                return rotated
+
+            # General case (dimensions not byte-aligned)
             for src_byte_idx in range(len(fb)):
-                if fb[src_byte_idx] == 0:
-                    continue  # Skip empty bytes
-                
-                # Calculate position of this byte in the source
-                src_pixel_idx = src_byte_idx * 8
-                src_y = src_pixel_idx // self.width
-                src_x_start = src_pixel_idx % self.width
-                
-                # Process each bit in this byte
                 byte_val = fb[src_byte_idx]
+                if byte_val == 0:
+                    continue  # Skip empty bytes
+
+                src_pixel_idx = src_byte_idx * 8
+                src_y = src_pixel_idx // width
+                src_x_start = src_pixel_idx % width
+
                 for bit in range(8):
                     if byte_val & (1 << (7 - bit)):
                         src_x = src_x_start + bit
-                        if src_x >= self.width:
+                        if src_x >= width:
                             continue
-                        
-                        # Rotated position
-                        new_x = src_y
-                        new_y = self.width - 1 - src_x
-                        
-                        # Set pixel in rotated buffer
-                        dst_idx = new_y * self.physical_width + new_x
-                        dst_byte = dst_idx >> 3
-                        dst_bit = 7 - (dst_idx & 7)
-                        rotated[dst_byte] |= (1 << dst_bit)
+
+                        dst_idx = (width - 1 - src_x) * phys_w + src_y
+                        rotated[dst_idx >> 3] |= (1 << (7 - (dst_idx & 7)))
             
             return rotated
         

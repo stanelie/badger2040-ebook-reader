@@ -1039,24 +1039,46 @@ def file_picker():
 
     selected = 0
     per_page = 6
+    page_start = -1
+    selection_buffers = []
     needs_redraw = True
 
     while True:
+        offset = (selected // per_page) * per_page
+
+        if offset != page_start:
+            # Pre-render every row of this page, so moving the selection is a
+            # pure buffer swap. Rendering on demand instead was noticeably
+            # laggy: rotating the framebuffer is the slowest loop in the
+            # project and it would run on every keypress. This costs one screen
+            # buffer per visible row (up to 6 x 4736 = ~28KB) while the picker
+            # is open, freed when it closes - worth it for responsive
+            # navigation, which happens far more often than opening the picker.
+            selection_buffers = []
+            rows = min(per_page, len(books) - offset)
+            for row in range(rows):
+                rotated = _draw_book_list(books, offset + row, per_page)
+                selection_buffers.append(bytearray(rotated))
+            page_start = offset
+            needs_redraw = True
+            gc.collect()
+
         if needs_redraw:
-            rotated = _draw_book_list(books, selected, per_page)
-            old_rot = display.rotation
-            display.rotation = 0
+            row = selected - offset
+            if 0 <= row < len(selection_buffers):
+                old_rot = display.rotation
+                display.rotation = 0
 
-            # Full refresh if first display
-            if first_display_update:
-                display.set_speed(0, no_flickering=False)
-                display.update(fb=rotated)
-                display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
-                first_display_update = False
-            else:
-                display.update(fb=rotated)
+                # Full refresh if first display
+                if first_display_update:
+                    display.set_speed(0, no_flickering=False)
+                    display.update(fb=selection_buffers[row])
+                    display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+                    first_display_update = False
+                else:
+                    display.update(fb=selection_buffers[row])
 
-            display.rotation = old_rot
+                display.rotation = old_rot
             needs_redraw = False
             led_off()
 
