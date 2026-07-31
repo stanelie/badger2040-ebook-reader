@@ -20,6 +20,7 @@ Only the standard library is needed (no Pillow, no hardware):
 python3 tools/test_reflow.py          # text layout + pagination
 python3 tools/test_quickback.py       # page-navigation state machine
 python3 tools/test_power.py           # sleep / inactivity behaviour
+python3 tools/test_picker.py          # book picker paging + input loop
 ```
 
 Both run against every installed `.pf` font by default; pass a font filename to
@@ -68,6 +69,13 @@ button press. Also checks that sleeping with no book open doesn't write a
 phantom NVRAM entry, and structurally that `file_picker` still calls
 `check_inactivity` and refreshes `last_activity` — the picker runs its own
 polling loop, and originally did neither.
+
+### test_picker.py
+
+Proves the picker's derived paging matches the stateful version it replaced for
+every book count from 1 to 25, and structurally that the select button is read
+before up/down (in a shared if/elif chain, a button reading as held would block
+selection entirely) and that the per-row page buffers stay gone.
 
 ## Font builders
 

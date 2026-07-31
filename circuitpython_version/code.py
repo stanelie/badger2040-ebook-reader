@@ -972,14 +972,59 @@ def list_books():
         pass
     return sorted(books)
 
+def _draw_book_list(books, selected, per_page):
+    """Draw the book list with `selected` highlighted and return the rotated
+    buffer, ready to hand to display.update().
+
+    Renders one screen on demand into the shared scratch frame. The previous
+    version pre-rendered a full-page copy for every selectable row - up to six
+    4,736-byte buffers, ~28KB held at once, which is far more than the
+    allocations that were causing MemoryError crashes.
+    """
+    offset = (selected // per_page) * per_page
+
+    with _ScratchFrame() as temp_fb:
+        display.text("Select Book:", 5, 5, 1)
+
+        for i in range(per_page):
+            idx = offset + i
+            if idx >= len(books):
+                break
+            name = books[idx].split("/")[-1]
+            if len(name) > 33:
+                name = name[:30] + "..."
+            y = 25 + i * 16
+
+            if idx == selected:
+                display.fb.fill_rect(2, y - 2, WIDTH - 4, 16, 1)
+                display.text(name, 5, y, 0)
+            else:
+                display.text(name, 5, y, 1)
+
+        if len(books) > per_page:
+            page = offset // per_page + 1
+            total = (len(books) + per_page - 1) // per_page
+            display.text(f"{page}/{total}", WIDTH - (vga2_8x16.WIDTH * 5),
+                         HEIGHT - vga2_8x16.HEIGHT - 10, 1)
+
+        storage_status = get_storage_status()
+        STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING
+        STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING
+        temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
+
+    return display._rotate_framebuffer(raw_working_buffer)
+
+
 def file_picker():
+    """Show the list of books and return the chosen path, or None if nothing
+    was chosen (no books, or the picker timed out and went to sleep)."""
     global first_display_update, last_activity
     books = list_books()
-    
+
     if not books:
         display.fb.fill(0)
         display.text("No books found!", 10, 40, 1)
-        
+
         # Full refresh if first display
         if first_display_update:
             display.set_speed(0, no_flickering=False)
@@ -988,117 +1033,52 @@ def file_picker():
             first_display_update = False
         else:
             display.update()
-        
+
         time.sleep(2)
         return None
-    
+
     selected = 0
-    offset = 0
-    prev_offset = -1
     per_page = 6
-    
-    selection_buffers = []
-    
+    needs_redraw = True
+
     while True:
-        if offset != prev_offset:
-            selection_buffers = []
-            
-            for sel_idx in range(per_page):
-                book_idx = offset + sel_idx
-                if book_idx >= len(books):
-                    break
-                
-                with _ScratchFrame() as temp_fb:
-                    display.text("Select Book:", 5, 5, 1)
+        if needs_redraw:
+            rotated = _draw_book_list(books, selected, per_page)
+            old_rot = display.rotation
+            display.rotation = 0
 
-                    for i in range(per_page):
-                        idx = offset + i
-                        if idx >= len(books): break
-                        name = books[idx].split("/")[-1]
-                        if len(name) > 33: name = name[:30] + "..."
-                        y = 25 + i * 16
+            # Full refresh if first display
+            if first_display_update:
+                display.set_speed(0, no_flickering=False)
+                display.update(fb=rotated)
+                display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+                first_display_update = False
+            else:
+                display.update(fb=rotated)
 
-                        if i == sel_idx:
-                            display.fb.fill_rect(2, y-2, WIDTH-4, 16, 1)
-                            display.text(name, 5, y, 0)
-                        else:
-                            display.text(name, 5, y, 1)
-
-                    if len(books) > per_page:
-                        page = offset // per_page + 1
-                        total = (len(books) + per_page - 1) // per_page
-                        display.text(f"{page}/{total}", WIDTH - (vga2_8x16.WIDTH * 5), HEIGHT - vga2_8x16.HEIGHT - 10, 1)
-
-                    storage_status = get_storage_status()
-                    STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING
-                    STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING
-                    temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
-
-                rotated = display._rotate_framebuffer(raw_working_buffer)
-                buffer_copy = bytearray(len(rotated))
-                for i in range(len(rotated)):
-                    buffer_copy[i] = rotated[i]
-                selection_buffers.append(buffer_copy)
-            
-            prev_offset = offset
-            
-            if selected < offset:
-                selected = offset
-            elif selected >= offset + len(selection_buffers):
-                selected = offset + len(selection_buffers) - 1
-            
-            sel_index_on_page = selected - offset
-            if 0 <= sel_index_on_page < len(selection_buffers):
-                old_rot = display.rotation
-                display.rotation = 0
-                
-                # Full refresh if first display
-                if first_display_update:
-                    display.set_speed(0, no_flickering=False)
-                    display.update(fb=selection_buffers[sel_index_on_page])
-                    display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
-                    first_display_update = False
-                else:
-                    display.update(fb=selection_buffers[sel_index_on_page])
-                
-                display.rotation = old_rot
+            display.rotation = old_rot
+            needs_redraw = False
             led_off()
-        
-        if button_pressed(buttons["down"]):
-            last_activity = time.monotonic()
-            selected = (selected + 1) % len(books)
 
-            if selected < offset or selected >= offset + per_page:
-                offset = (selected // per_page) * per_page
-            else:
-                sel_index_on_page = selected - offset
-                if 0 <= sel_index_on_page < len(selection_buffers):
-                    old_rot = display.rotation
-                    display.rotation = 0
-                    display.update(fb=selection_buffers[sel_index_on_page])
-                    display.rotation = old_rot
-            time.sleep(0.15)
-            
-        elif button_pressed(buttons["up"]):
-            last_activity = time.monotonic()
-            selected = (selected - 1) % len(books)
-
-            if selected < offset or selected >= offset + per_page:
-                offset = (selected // per_page) * per_page
-            else:
-                sel_index_on_page = selected - offset
-                if 0 <= sel_index_on_page < len(selection_buffers):
-                    old_rot = display.rotation
-                    display.rotation = 0
-                    display.update(fb=selection_buffers[sel_index_on_page])
-                    display.rotation = old_rot
-            time.sleep(0.15)
-            
-        elif button_pressed(buttons["a"]):
+        # Check the select button FIRST. When it shared an if/elif chain with
+        # up/down, a button reading as held would stop selection working at all.
+        if button_pressed(buttons["a"]):
             last_activity = time.monotonic()
             while button_pressed(buttons["a"]):
                 time.sleep(0.05)
             return books[selected]
+
+        if button_pressed(buttons["down"]):
+            last_activity = time.monotonic()
+            selected = (selected + 1) % len(books)
+            needs_redraw = True
+            time.sleep(0.15)
+
+        elif button_pressed(buttons["up"]):
+            last_activity = time.monotonic()
+            selected = (selected - 1) % len(books)
+            needs_redraw = True
+            time.sleep(0.15)
 
         # The picker runs its own polling loop, so it has to honour the
         # inactivity timeout itself - otherwise leaving the device sitting in
