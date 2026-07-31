@@ -906,6 +906,20 @@ def wait_for_display():
     display.wait_ready()
 
 
+def show_message(*items, blocking=True):
+    """Draw a full-screen message and push it to the panel.
+
+    Each item is (text, x, y) in the monospace UI font. Used for the reset,
+    sleep and status screens, which otherwise all repeated the same
+    clear / draw / rotate / update dance.
+    """
+    with _ScratchFrame():
+        for text, x, y in items:
+            display.text(text, x, y, 1)
+    rotated = display._rotate_framebuffer(raw_working_buffer)
+    update_display_fast(rotated, blocking=blocking)
+
+
 def prerender_next():
     """Render the page AFTER the current one into next_rotated_buffer, so a
     forward press can swap to it instantly."""
@@ -1080,6 +1094,268 @@ def file_picker():
         
         time.sleep(0.05)
 
+# ---------------- NAVIGATION -----------------
+# All the page/buffer state transitions live here, deliberately free of button
+# polling and press timing. That keeps the main loop a thin dispatcher, and it
+# lets tools/test_quickback.py import and drive these directly (with the
+# rendering and display calls stubbed) instead of re-implementing them.
+
+def nav_page_down():
+    """Advance one page, using the pre-rendered next page when available.
+
+    Returns (advanced, prev_came_free): whether the position moved, and whether
+    the previous-page buffer was filled for free by the rotation - if it was,
+    the caller must NOT call prerender_prev() and re-render it needlessly.
+    """
+    global current_offset, current_remainder
+    global current_rotated_buffer, next_rotated_buffer, prev_rotated_buffer
+    global next_page_ready
+    global prev_page_ready, prev_page_offset, prev_page_remainder
+
+    if next_page_ready:
+        history_push(current_offset, current_remainder)
+        leaving_offset, leaving_remainder = current_offset, current_remainder
+        prev_came_free = False
+        if QUICK_BACK_OK:
+            # Rotate all three: the page being left is already drawn, so it
+            # becomes the previous page for free; the pre-rendered next becomes
+            # current; the stale prev buffer is recycled as the new next.
+            prev_rotated_buffer, current_rotated_buffer, next_rotated_buffer = (
+                current_rotated_buffer, next_rotated_buffer, prev_rotated_buffer)
+            prev_page_offset, prev_page_remainder = leaving_offset, leaving_remainder
+            prev_page_ready = True
+            prev_came_free = True
+        else:
+            current_rotated_buffer, next_rotated_buffer = (
+                next_rotated_buffer, current_rotated_buffer)
+        current_offset = next_page_offset
+        current_remainder = next_page_remainder
+        update_display_fast(current_rotated_buffer)
+        next_page_ready = False
+        return True, prev_came_free
+
+    # Nothing pre-rendered - paginate and draw on demand.
+    if current_offset >= 0:
+        lines, next_off, next_rem = paginate_text(
+            text_file, current_offset, current_remainder)
+        if lines and next_off > current_offset:
+            history_push(current_offset, current_remainder)
+            leaving_offset, leaving_remainder = current_offset, current_remainder
+            prev_came_free = False
+            if QUICK_BACK_OK:
+                # Keep the drawn page we're leaving as the previous page and
+                # draw the new page into the recycled prev buffer.
+                prev_rotated_buffer, current_rotated_buffer = (
+                    current_rotated_buffer, prev_rotated_buffer)
+                prev_page_offset, prev_page_remainder = leaving_offset, leaving_remainder
+                prev_page_ready = True
+                prev_came_free = True
+            current_offset = next_off
+            current_remainder = next_rem
+            render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+            update_display_fast(current_rotated_buffer)
+            return True, prev_came_free
+
+    return False, False
+
+
+def nav_fast_advance(max_pages=49):
+    """Long-press skip: run the offset forward without rendering the pages
+    passed over, then draw where we land and rebuild both neighbours."""
+    global current_offset, current_remainder
+
+    for i in range(max_pages):
+        # Skip hyphenation here: these pages are only used to advance the
+        # offset, never rendered, so we don't pay for hyphenating them.
+        lines, next_off, next_rem = paginate_text(
+            text_file, current_offset, current_remainder, hyphenate=False)
+        if not lines or next_off <= current_offset:
+            break
+        # Don't save every page to history during fast advance
+        if i % 10 == 0:
+            history_push(current_offset, current_remainder)
+            gc.collect()
+        current_offset = next_off
+        current_remainder = next_rem
+
+    render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+    update_display_fast(current_rotated_buffer)
+    # Jumped far, so the buffered neighbours are no longer adjacent
+    prerender_next()
+    prerender_prev()
+
+
+def nav_page_up():
+    """Go back one page, instantly when the previous page is already buffered.
+    Returns True if the position moved."""
+    global current_offset, current_remainder
+    global current_rotated_buffer, next_rotated_buffer, prev_rotated_buffer
+    global next_page_ready, next_page_offset, next_page_remainder
+    global prev_page_ready
+
+    if current_offset <= 0:
+        return False
+
+    # Try to get previous page from history, else calculate it
+    prev = history_pop()
+    if not prev:
+        prev = find_previous_page(current_offset)
+
+    next_came_free = False
+    if (QUICK_BACK_OK and prev_page_ready
+            and prev_page_offset == prev[0]
+            and prev_page_remainder == prev[1]):
+        # QUICK BACK: the previous page is already drawn, so just rotate. The
+        # page being left is already drawn too, so it becomes the next page for
+        # free; the stale next buffer is recycled as prev.
+        next_rotated_buffer, current_rotated_buffer, prev_rotated_buffer = (
+            current_rotated_buffer, prev_rotated_buffer, next_rotated_buffer)
+        next_page_offset, next_page_remainder = current_offset, current_remainder
+        next_page_ready = True
+        next_came_free = True
+        current_offset, current_remainder = prev
+        prev_page_ready = False
+        update_display_fast(current_rotated_buffer)
+    else:
+        current_offset, current_remainder = prev
+        render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+        update_display_fast(current_rotated_buffer)
+
+    if not next_came_free:
+        prerender_next()
+    prerender_prev()
+    return True
+
+
+# ---------------- INPUT HANDLERS -----------------
+
+def cycle_font():
+    """B button: switch to the next installed reading font, persist the choice
+    and redraw. The page reflows because the metrics differ, but the byte
+    offset stays a valid starting point."""
+    global font_index, FONT
+
+    if len(AVAILABLE_FONTS) < 2:
+        return
+    font_index = (font_index + 1) % len(AVAILABLE_FONTS)
+    try:
+        FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+        save_font_index(font_index)
+        gc.collect()
+        render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+        update_display_fast(current_rotated_buffer)
+        # The buffered neighbours were drawn in the old font; rebuild both.
+        prerender_next()
+        prerender_prev()
+    except Exception as e:
+        print(f"font switch error: {e}")
+
+
+def factory_reset():
+    """Wipe saved state and restart. Does not return."""
+    show_message(("RESETTING...", 80, 55))
+
+    try:
+        NVM[0:256] = bytes(256)
+        print("NVRAM cleared")
+    except Exception as e:
+        print(f"NVRAM clear error: {e}")
+
+    # Delete any legacy .idx files if they exist
+    try:
+        for f in os.listdir("/state"):
+            if f.endswith(".idx"):
+                try:
+                    os.remove("/state/" + f)
+                    print(f"Deleted: /state/{f}")
+                except:
+                    pass
+    except:
+        pass
+
+    show_message(("RESET COMPLETE", 65, 45), ("Restarting...", 80, 70))
+    time.sleep(1.5)
+    microcontroller.reset()
+
+
+def open_picker():
+    """Show the book picker and switch books, or restore the current one."""
+    global text_file, current_offset, current_remainder
+    global next_page_ready, next_page_offset, next_page_remainder
+    global prev_page_ready, prev_page_offset, prev_page_remainder
+
+    force_save_state()  # Save before potentially switching books
+    saved = (current_offset, current_remainder,
+             next_page_ready, next_page_offset, next_page_remainder,
+             prev_page_ready, prev_page_offset, prev_page_remainder)
+
+    new_book = file_picker()
+    if not new_book:
+        return
+
+    led_on()
+    if text_file != new_book:
+        # Switching books - load saved position for the new one
+        text_file = new_book
+        current_offset, current_remainder = state_load_book(text_file)
+        history_clear()
+        render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+        update_display_fast(current_rotated_buffer)
+        prerender_next()
+        prerender_prev()
+        force_save_state()  # Save new book position
+    else:
+        # Same book - restore (the picker draws through its own buffers, so the
+        # neighbour page images are still valid)
+        (current_offset, current_remainder,
+         next_page_ready, next_page_offset, next_page_remainder,
+         prev_page_ready, prev_page_offset, prev_page_remainder) = saved
+        render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+        update_display_fast(current_rotated_buffer)
+
+    gc.collect()
+    led_off()
+
+
+def handle_menu_button():
+    """A button: short press opens the picker, long press forces a full
+    refresh, holding for 10s triggers a factory reset."""
+    press_start = time.monotonic()
+    reset_warning_shown = False
+
+    while button_pressed(buttons["a"]):
+        # Warn after 3 seconds that a reset is coming
+        if time.monotonic() - press_start > 3.0 and not reset_warning_shown:
+            show_message(("FACTORY RESET", 70, 30),
+                         ("Keep holding to reset...", 30, 55),
+                         ("Release to cancel", 55, 80))
+            reset_warning_shown = True
+        time.sleep(0.05)
+    press_duration = time.monotonic() - press_start
+
+    if press_duration >= 10.0:
+        led_on()
+        factory_reset()  # does not return
+    elif press_duration > 0.7:
+        # Full refresh (clears e-ink ghosting)
+        if reset_warning_shown:
+            render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+        display.set_speed(0, no_flickering=False)
+        update_display_fast(current_rotated_buffer, blocking=True)
+        display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+        led_off()
+    else:
+        open_picker()
+
+
+def enter_sleep():
+    """Save the reading position, show the sleep screen and cut the display
+    rail. Waking runs code.py from the top again."""
+    force_save_state()  # Critical: save before power down
+    show_message(("Sleeping...", 110, 30), ("press any key to wake", 60, 90))
+    board.ENABLE_DIO.value = False
+
+
 # ---------------- MAIN -----------------
 
 # Flag to force full refresh on first display update after wake-up
@@ -1166,171 +1442,56 @@ led_off()
 while True:
     if any(button_pressed(b) for b in buttons.values()):
         last_activity = time.monotonic()
-        
-    # PAGE DOWN
+
+    # PAGE DOWN - short press turns one page, long press skips ahead
     if button_pressed(buttons["down"]):
         led_on()
-        
-        # IMMEDIATE VISUAL FEEDBACK: Advance and display first page instantly
-        page_advanced = False
-        prev_came_free = False
-        if next_page_ready:
-            # Save current position to history
-            history_push(current_offset, current_remainder)
 
-            leaving_offset, leaving_remainder = current_offset, current_remainder
-            if QUICK_BACK_OK:
-                # Rotate all three: the page being left is already drawn, so it
-                # becomes the previous page for free; the pre-rendered next
-                # becomes current; the stale prev buffer is recycled as the new
-                # next. No extra rendering is needed for quick-back here.
-                prev_rotated_buffer, current_rotated_buffer, next_rotated_buffer = (
-                    current_rotated_buffer, next_rotated_buffer, prev_rotated_buffer)
-                prev_page_offset, prev_page_remainder = leaving_offset, leaving_remainder
-                prev_page_ready = True
-                prev_came_free = True
-            else:
-                current_rotated_buffer, next_rotated_buffer = next_rotated_buffer, current_rotated_buffer
-            current_offset = next_page_offset
-            current_remainder = next_page_remainder
-            update_display_fast(current_rotated_buffer)
-            next_page_ready = False
-            page_advanced = True
-        elif current_offset >= 0:
-            # No pre-rendered page, try to advance
-            lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder)
-            if lines and next_off > current_offset:
-                history_push(current_offset, current_remainder)
-                leaving_offset, leaving_remainder = current_offset, current_remainder
-                if QUICK_BACK_OK:
-                    # Keep the drawn page we're leaving as the previous page and
-                    # draw the new page into the recycled prev buffer.
-                    prev_rotated_buffer, current_rotated_buffer = (
-                        current_rotated_buffer, prev_rotated_buffer)
-                    prev_page_offset, prev_page_remainder = leaving_offset, leaving_remainder
-                    prev_page_ready = True
-                    prev_came_free = True
-                current_offset = next_off
-                current_remainder = next_rem
-                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-                update_display_fast(current_rotated_buffer)
-                page_advanced = True
-        
-        # Now check if button is still held for long-press detection
+        # Turn one page immediately so the press feels instant, then look at
+        # how long the button is actually held.
+        page_advanced, prev_came_free = nav_page_down()
+
         if page_advanced:
             press_start = time.monotonic()
             while button_pressed(buttons["down"]):
                 time.sleep(0.05)
-            press_duration = time.monotonic() - press_start
-            
-            if press_duration > 0.7:  # Long press: continue advancing more pages
-                FAST_ADVANCE_PAGES = 49  # Already advanced 1, so 49 more = 50 total
-                
-                for i in range(FAST_ADVANCE_PAGES):
-                    # Skip hyphenation here: these pages are only used to advance
-                    # the offset, never rendered, so we don't pay for hyphenating them.
-                    lines, next_off, next_rem = paginate_text(text_file, current_offset, current_remainder, hyphenate=False)
 
-                    if not lines or next_off <= current_offset:
-                        break
-                    
-                    # Don't save every page to history during fast advance
-                    if i % 10 == 0:
-                        history_push(current_offset, current_remainder)
-                        gc.collect()
-                    
-                    current_offset = next_off
-                    current_remainder = next_rem
-                
-                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-                update_display_fast(current_rotated_buffer)
-
-                # Jumped far, so the buffered previous page is no longer adjacent
-                prerender_next()
-                prerender_prev()
-
+            if time.monotonic() - press_start > 0.7:
+                nav_fast_advance()
                 force_save_state()  # Always save after fast advance
             else:
-                # Short press: single page already advanced, just pre-render the
-                # neighbours (the previous page came free from the buffer
-                # rotation above, so it doesn't need re-rendering).
+                # The previous page came free from the buffer rotation, so it
+                # only needs re-rendering when it didn't.
                 nonblocking = update_display_fast(current_rotated_buffer, blocking=False)
                 prerender_next()
                 if not prev_came_free:
                     prerender_prev()
                 if nonblocking:
                     wait_for_display()
-
                 maybe_save_state()  # Periodic save only
-        
+
         led_off()
 
     # PAGE UP
     if button_pressed(buttons["up"]):
         led_on()
-        
         while button_pressed(buttons["up"]):
             time.sleep(0.05)
-        
-        if current_offset > 0:
-            # Try to get previous page from history
-            prev = history_pop()
 
-            if not prev:
-                # Calculate previous page
-                prev = find_previous_page(current_offset)
-
-            next_came_free = False
-            if (QUICK_BACK_OK and prev_page_ready
-                    and prev_page_offset == prev[0]
-                    and prev_page_remainder == prev[1]):
-                # QUICK BACK: the previous page is already drawn, so just rotate.
-                # The page being left is already drawn too, so it becomes the
-                # next page for free; the stale next buffer is recycled as prev.
-                next_rotated_buffer, current_rotated_buffer, prev_rotated_buffer = (
-                    current_rotated_buffer, prev_rotated_buffer, next_rotated_buffer)
-                next_page_offset, next_page_remainder = current_offset, current_remainder
-                next_page_ready = True
-                next_came_free = True
-                current_offset, current_remainder = prev
-                prev_page_ready = False
-                update_display_fast(current_rotated_buffer)
-            else:
-                current_offset, current_remainder = prev
-                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-                update_display_fast(current_rotated_buffer)
-
-            if not next_came_free:
-                prerender_next()
-            prerender_prev()
-
+        if nav_page_up():
             maybe_save_state()  # Periodic save only
-        
+
         gc.collect()
         led_off()
 
-    # FONT TOGGLE (B): cycle the reading font, persist it, re-render the page.
+    # FONT TOGGLE (B)
     if button_pressed(buttons["b"]):
         led_on()
         while button_pressed(buttons["b"]):
             time.sleep(0.05)
         last_activity = time.monotonic()
 
-        if len(AVAILABLE_FONTS) > 1:
-            font_index = (font_index + 1) % len(AVAILABLE_FONTS)
-            try:
-                FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
-                save_font_index(font_index)
-                gc.collect()
-                # Re-render the current page in the new font. Its metrics differ
-                # so the page reflows, but the byte offset stays a valid start.
-                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-                update_display_fast(current_rotated_buffer)
-                # The buffered neighbours were drawn in the old font; rebuild both.
-                prerender_next()
-                prerender_prev()
-            except Exception as e:
-                print(f"font switch error: {e}")
+        cycle_font()
 
         gc.collect()
         led_off()
@@ -1338,138 +1499,15 @@ while True:
     # FILE PICKER (SHORT) / FULL REFRESH (LONG) / FACTORY RESET (VERY LONG)
     if button_pressed(buttons["a"]):
         led_on()
-        
-        # Measure press duration with visual feedback for reset
-        press_start = time.monotonic()
-        reset_warning_shown = False
-        while button_pressed(buttons["a"]):
-            press_duration = time.monotonic() - press_start
-            # Show warning after 3 seconds that reset is coming
-            if press_duration > 3.0 and not reset_warning_shown:
-                # Render reset warning screen
-                with _ScratchFrame():
-                    display.text("FACTORY RESET", 70, 30, 1)
-                    display.text("Keep holding to reset...", 30, 55, 1)
-                    display.text("Release to cancel", 55, 80, 1)
-                rotated = display._rotate_framebuffer(raw_working_buffer)
-                update_display_fast(rotated, blocking=True)
-                reset_warning_shown = True
-            time.sleep(0.05)
-        press_duration = time.monotonic() - press_start
-        
-        if press_duration >= 10.0:  # Very long press: Factory reset
-            led_on()
-            
-            # Show resetting message
-            with _ScratchFrame():
-                display.text("RESETTING...", 80, 55, 1)
-            rotated = display._rotate_framebuffer(raw_working_buffer)
-            update_display_fast(rotated, blocking=True)
-            
-            # Clear NVRAM
-            try:
-                NVM[0:256] = bytes(256)
-                print("NVRAM cleared")
-            except Exception as e:
-                print(f"NVRAM clear error: {e}")
-            
-            # Delete any legacy .idx files if they exist
-            try:
-                for f in os.listdir("/state"):
-                    if f.endswith(".idx"):
-                        try:
-                            os.remove("/state/" + f)
-                            print(f"Deleted: /state/{f}")
-                        except:
-                            pass
-            except:
-                pass
-            
-            # Show complete message
-            with _ScratchFrame():
-                display.text("RESET COMPLETE", 65, 45, 1)
-                display.text("Restarting...", 80, 70, 1)
-            rotated = display._rotate_framebuffer(raw_working_buffer)
-            update_display_fast(rotated, blocking=True)
-            
-            time.sleep(1.5)
-            microcontroller.reset()
-            
-        elif press_duration > 0.7:  # Long press: Full refresh
-            if reset_warning_shown:
-                render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-            display.set_speed(0, no_flickering=False)
-            update_display_fast(current_rotated_buffer, blocking=True)
-            display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
-            led_off()
-        else:  # Short press: File picker
-            force_save_state()  # Save before potentially switching books
-            
-            saved_offset = current_offset
-            saved_remainder = current_remainder
-            saved_next_ready = next_page_ready
-            saved_next_offset = next_page_offset
-            saved_next_remainder = next_page_remainder
-            saved_prev_ready = prev_page_ready
-            saved_prev_offset = prev_page_offset
-            saved_prev_remainder = prev_page_remainder
-            
-            new_book = file_picker()
-            
-            if new_book:
-                led_on()
-                
-                if text_file != new_book:
-                    # Switching books - load saved position for new book
-                    text_file = new_book
-                    current_offset, current_remainder = state_load_book(text_file)
-                    history_clear()
-                    
-                    render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-                    update_display_fast(current_rotated_buffer)
+        handle_menu_button()
 
-                    prerender_next()
-                    prerender_prev()
-
-                    force_save_state()  # Save new book position
-                    gc.collect()
-                else:
-                    # Same book - restore (the picker draws through its own
-                    # buffers, so the neighbour page images are still valid)
-                    current_offset = saved_offset
-                    current_remainder = saved_remainder
-                    next_page_ready = saved_next_ready
-                    next_page_offset = saved_next_offset
-                    next_page_remainder = saved_next_remainder
-                    prev_page_ready = saved_prev_ready
-                    prev_page_offset = saved_prev_offset
-                    prev_page_remainder = saved_prev_remainder
-
-                    render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-                    update_display_fast(current_rotated_buffer)
-                    gc.collect()
-                
-                led_off()
-             
     # INACTIVITY TIMEOUT
     if time.monotonic() - last_activity > INACTIVITY_TIMEOUT:
         _, is_charging = get_battery_status()
-        
+
         if is_charging:
             last_activity = time.monotonic()
         else:
             led_on()
-            force_save_state()  # Critical: save before power down
-            
-            # Display sleep message
-            with _ScratchFrame():
-                display.text("Sleeping...", 110, 30, 1)
-                display.text("press any key to wake", 60, 90, 1)
-            
-            rotated = display._rotate_framebuffer(raw_working_buffer)
-            old_rot = display.rotation
-            display.rotation = 0
-            # display.set_speed(0, no_flickering=False)  # Full refresh for sleep message
-            display.update(fb=rotated)
-            board.ENABLE_DIO.value = False
+            enter_sleep()
             led_off()

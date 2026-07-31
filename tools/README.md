@@ -10,6 +10,10 @@ exercised without hardware. Both harnesses pull the real functions out of
 `circuitpython_version/code.py` with `ast` and run them, so they always test the
 code that actually ships rather than a copy.
 
+If you add a function that these should cover, add its name to `EXTRACT` in
+`_harness.py`. Keep hardware access (panel, framebuffer, NVRAM, buttons) out of
+the logic functions so they stay testable — the harnesses stub those.
+
 Only the standard library is needed (no Pillow, no hardware):
 
 ```
@@ -38,17 +42,20 @@ to be exactly reproducible.
 
 ### test_quickback.py
 
-Simulates the three screen buffers (previous / current / next) and the rotation
-that makes both directions instant, driving random button sequences and checking
-after **every** press that the displayed buffer really holds the current page,
-that the ready-flags never lie about what a buffer contains, and that the
-buffers never alias into the same object.
+Drives the real `nav_page_down` / `nav_fast_advance` / `nav_page_up` from
+`code.py` through random button sequences, checking after **every** press that
+the displayed buffer really holds the current page, that the ready-flags never
+lie about what a buffer contains, and that the three screen buffers never alias
+into the same object.
 
-**Caveat:** the navigation logic lives inline in `code.py`'s `while True:` loop,
-so it can't be imported — `Reader` in this file *mirrors* it. If you change
-navigation in `code.py`, mirror the change here or the test will happily keep
-passing against stale logic. (`paginate_text` and `find_previous_page` are the
-real ones.)
+Only the hardware is stubbed: "rendering" a page records which page went into
+which buffer, and "displaying" records which buffer was pushed to the panel.
+The pagination, hyphenation, history and buffer-rotation logic under test is
+the shipping code.
+
+This is why the navigation state transitions live in `nav_*` functions instead
+of inline in the main loop — the main loop only polls buttons and times presses,
+which is the part that genuinely needs hardware.
 
 ## Font builders
 

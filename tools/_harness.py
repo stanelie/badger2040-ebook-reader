@@ -34,9 +34,17 @@ HEIGHT = 128
 TEXT_WIDTH = WIDTH - TEXT_PADDING * 2
 LINES_PER_PAGE = 9
 
+PAGE_HISTORY_SIZE = 10
+
 # The functions worth testing offline: everything that decides what text lands
-# on a page, and how back-navigation finds its way.
-EXTRACT = ("paginate_text", "find_previous_page", "_pixel_chunks", "_paragraph_start")
+# on a page, plus the navigation state machine (which buffer holds which page).
+# Anything touching the panel or the framebuffer is stubbed by the caller.
+EXTRACT = (
+    "paginate_text", "find_previous_page", "_pixel_chunks", "_paragraph_start",
+    "history_push", "history_pop", "history_peek", "history_clear",
+    "prerender_next", "prerender_prev",
+    "nav_page_down", "nav_fast_advance", "nav_page_up",
+)
 
 
 class _GC:
@@ -76,6 +84,8 @@ def load_engine(font_file):
         "hyphenator": hyphenator,
         "HYPHENATE": True,
         "_HYPHEN_OK": True,
+        "PAGE_HISTORY_SIZE": PAGE_HISTORY_SIZE,
+        "page_history": [],
     }
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name in EXTRACT:

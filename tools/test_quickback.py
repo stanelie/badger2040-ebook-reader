@@ -1,23 +1,25 @@
-"""Offline simulation of the reader's page-navigation state machine.
+"""Offline test of the reader's page-navigation state machine.
 
-    python tools/test_quickback.py            # every installed font
-    python tools/test_quickback.py literata.pf
+    python3 tools/test_quickback.py            # every installed font
+    python3 tools/test_quickback.py literata.pf
 
 Navigation keeps three screen buffers (previous / current / next) and rotates
-which is which on every page turn, so that both directions are instant. That
+which is which on every page turn, so both directions are instant. That
 rotation is easy to get subtly wrong - an aliased buffer, or a ready-flag that
-claims a buffer holds a page it doesn't - and the symptom would be the display
-silently showing the wrong page. paginate_text and find_previous_page are the
-real ones from code.py; the buffer bookkeeping in the main loop is mirrored
-here (it lives inline in the `while True:` loop, so it can't be imported).
+claims a buffer holds a page it doesn't - and the symptom on the device would
+be the display silently showing the wrong page.
+
+This drives the REAL nav_page_down / nav_fast_advance / nav_page_up from
+code.py. Only the things that need hardware are stubbed: rendering a page
+records which page went into which buffer, and "displaying" records which
+buffer was pushed to the panel. Everything else - pagination, hyphenation,
+history, the buffer rotation itself - is the shipping code.
 
 Checked after EVERY simulated button press:
   1. the displayed buffer holds exactly the current page (the screen can't lie)
   2. next_page_ready implies the next buffer really holds the next page
   3. prev_page_ready implies the prev buffer really holds the previous page
   4. the buffers never alias into the same object
-
-If you change the navigation logic in code.py, mirror it in Reader below.
 """
 import os
 import random
@@ -26,11 +28,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import available_fonts, load_engine, make_corpus
 
-PAGE_HISTORY_SIZE = 10  # mirrors code.py
-
 
 class Buf:
-    """A screen buffer; .page records which page is currently drawn in it."""
+    """Stands in for a rotated screen buffer. The navigation code only ever
+    rebinds these names, never indexes them, so an opaque object is enough -
+    and it lets us record which page was drawn into it."""
     __slots__ = ("name", "page")
 
     def __init__(self, name):
@@ -41,204 +43,115 @@ class Buf:
         return f"<{self.name} {self.page}>"
 
 
-class Reader:
-    """Mirror of the navigation state machine in code.py's main loop."""
+class Engine:
+    """Wraps the extracted code.py namespace and drives its real nav functions."""
 
     def __init__(self, ns, path, quick_back=True):
         self.ns = ns
-        self.paginate_text = ns["paginate_text"]
-        self.find_previous_page = ns["find_previous_page"]
-        self.path = path
+        self.quick_back = quick_back
+
         ns["text_file"] = path
-        self.QUICK_BACK_OK = quick_back
+        ns["QUICK_BACK_OK"] = quick_back
+        ns["page_history"] = []
 
-        self.cur_buf = Buf("A")
-        self.next_buf = Buf("B")
-        self.prev_buf = Buf("C") if quick_back else None
+        ns["current_rotated_buffer"] = Buf("A")
+        ns["next_rotated_buffer"] = Buf("B")
+        ns["prev_rotated_buffer"] = Buf("C") if quick_back else None
 
-        self.current_offset = 0
-        self.current_remainder = b""
-        self.next_page_ready = False
-        self.next_page_offset = 0
-        self.next_page_remainder = b""
-        self.prev_page_ready = False
-        self.prev_page_offset = 0
-        self.prev_page_remainder = b""
-        self.history = []
+        ns["current_offset"] = 0
+        ns["current_remainder"] = b""
+        ns["next_page_ready"] = False
+        ns["next_page_offset"] = 0
+        ns["next_page_remainder"] = b""
+        ns["prev_page_ready"] = False
+        ns["prev_page_offset"] = 0
+        ns["prev_page_remainder"] = b""
+
+        # --- hardware stubs -------------------------------------------------
+        ns["render_page_to_buffer"] = self._render
+        ns["update_display_fast"] = self._display
+        ns["wait_for_display"] = lambda: None
+        ns["maybe_save_state"] = lambda: None
+        ns["force_save_state"] = lambda: None
 
         self.displayed = None
         self.render_count = 0
         self.instant_backs = 0
         self.rendered_backs = 0
 
-        self.render(self.cur_buf, self.current_offset, self.current_remainder)
-        self.display(self.cur_buf)
-        self.prerender_next()
-        self.prerender_prev()
+        # startup: draw the first page and pre-render its neighbours, exactly
+        # as the MAIN section of code.py does
+        self._render(0, b"", ns["current_rotated_buffer"])
+        self._display(ns["current_rotated_buffer"])
+        ns["prerender_next"]()
+        ns["prerender_prev"]()
 
-    # --- primitives ------------------------------------------------------
-    def render(self, buf, off, rem):
-        buf.page = (off, rem)
+    # --- stubs --------------------------------------------------------------
+    def _render(self, offset, remainder, target):
+        target.page = (offset, remainder)
         self.render_count += 1
 
-    def display(self, buf):
+    def _display(self, buf, blocking=True):
         self.displayed = buf
+        return False   # mimic a blocking update, so callers don't wait
 
-    def history_push(self, off, rem):
-        self.history.append((off, rem))
-        if len(self.history) > PAGE_HISTORY_SIZE:
-            self.history.pop(0)
+    # --- state accessors ----------------------------------------------------
+    def __getitem__(self, key):
+        return self.ns[key]
 
-    def history_pop(self):
-        return self.history.pop() if self.history else None
+    @property
+    def page(self):
+        return (self.ns["current_offset"], self.ns["current_remainder"])
 
-    def history_peek(self):
-        return self.history[-1] if self.history else None
-
-    # --- mirrors of prerender_next / prerender_prev ----------------------
-    def prerender_next(self):
-        lines, next_off, next_rem = self.paginate_text(
-            self.path, self.current_offset, self.current_remainder)
-        if lines and next_off > self.current_offset:
-            self.next_page_offset = next_off
-            self.next_page_remainder = next_rem
-            self.render(self.next_buf, next_off, next_rem)
-            self.next_page_ready = True
-        else:
-            self.next_page_ready = False
-
-    def prerender_prev(self):
-        self.prev_page_ready = False
-        if not self.QUICK_BACK_OK or self.current_offset <= 0:
-            return
-        pos = self.history_peek()
-        if pos is None:
-            pos = self.find_previous_page(self.current_offset)
-        if not pos:
-            return
-        p_off, p_rem = pos
-        if p_off == self.current_offset and p_rem == self.current_remainder:
-            return
-        self.prev_page_offset = p_off
-        self.prev_page_remainder = p_rem
-        self.render(self.prev_buf, p_off, p_rem)
-        self.prev_page_ready = True
-
-    # --- mirrors of the PAGE DOWN / PAGE UP handlers ---------------------
+    # --- actions (call the real code) ---------------------------------------
     def page_down(self, long_press=False):
-        page_advanced = False
-        prev_came_free = False
-
-        if self.next_page_ready:
-            self.history_push(self.current_offset, self.current_remainder)
-            leaving = (self.current_offset, self.current_remainder)
-            if self.QUICK_BACK_OK:
-                self.prev_buf, self.cur_buf, self.next_buf = (
-                    self.cur_buf, self.next_buf, self.prev_buf)
-                self.prev_page_offset, self.prev_page_remainder = leaving
-                self.prev_page_ready = True
-                prev_came_free = True
-            else:
-                self.cur_buf, self.next_buf = self.next_buf, self.cur_buf
-            self.current_offset = self.next_page_offset
-            self.current_remainder = self.next_page_remainder
-            self.display(self.cur_buf)
-            self.next_page_ready = False
-            page_advanced = True
-        elif self.current_offset >= 0:
-            lines, next_off, next_rem = self.paginate_text(
-                self.path, self.current_offset, self.current_remainder)
-            if lines and next_off > self.current_offset:
-                self.history_push(self.current_offset, self.current_remainder)
-                leaving = (self.current_offset, self.current_remainder)
-                if self.QUICK_BACK_OK:
-                    self.prev_buf, self.cur_buf = self.cur_buf, self.prev_buf
-                    self.prev_page_offset, self.prev_page_remainder = leaving
-                    self.prev_page_ready = True
-                    prev_came_free = True
-                self.current_offset = next_off
-                self.current_remainder = next_rem
-                self.render(self.cur_buf, self.current_offset, self.current_remainder)
-                self.display(self.cur_buf)
-                page_advanced = True
-
-        if not page_advanced:
+        advanced, prev_came_free = self.ns["nav_page_down"]()
+        if not advanced:
             return False
-
         if long_press:
-            for i in range(49):
-                lines, next_off, next_rem = self.paginate_text(
-                    self.path, self.current_offset, self.current_remainder, False)
-                if not lines or next_off <= self.current_offset:
-                    break
-                if i % 10 == 0:
-                    self.history_push(self.current_offset, self.current_remainder)
-                self.current_offset = next_off
-                self.current_remainder = next_rem
-            self.render(self.cur_buf, self.current_offset, self.current_remainder)
-            self.display(self.cur_buf)
-            self.prerender_next()
-            self.prerender_prev()
+            self.ns["nav_fast_advance"]()
         else:
-            self.prerender_next()
+            self.ns["prerender_next"]()
             if not prev_came_free:
-                self.prerender_prev()
+                self.ns["prerender_prev"]()
         return True
 
     def page_up(self):
-        if self.current_offset <= 0:
-            return False
-        prev = self.history_pop()
-        if not prev:
-            prev = self.find_previous_page(self.current_offset)
+        before = self.render_count
+        moved = self.ns["nav_page_up"]()
+        if moved:
+            # a quick back re-renders only the new neighbour, never the page
+            # itself, so it costs strictly fewer renders than the slow path
+            if self.render_count - before <= 1:
+                self.instant_backs += 1
+            else:
+                self.rendered_backs += 1
+        return moved
 
-        next_came_free = False
-        if (self.QUICK_BACK_OK and self.prev_page_ready
-                and self.prev_page_offset == prev[0]
-                and self.prev_page_remainder == prev[1]):
-            self.next_buf, self.cur_buf, self.prev_buf = (
-                self.cur_buf, self.prev_buf, self.next_buf)
-            self.next_page_offset = self.current_offset
-            self.next_page_remainder = self.current_remainder
-            self.next_page_ready = True
-            next_came_free = True
-            self.current_offset, self.current_remainder = prev
-            self.prev_page_ready = False
-            self.display(self.cur_buf)
-            self.instant_backs += 1
-        else:
-            self.current_offset, self.current_remainder = prev
-            self.render(self.cur_buf, self.current_offset, self.current_remainder)
-            self.display(self.cur_buf)
-            self.rendered_backs += 1
-
-        if not next_came_free:
-            self.prerender_next()
-        self.prerender_prev()
-        return True
-
-    # --- invariants ------------------------------------------------------
+    # --- invariants ---------------------------------------------------------
     def check(self, where):
-        cur = (self.current_offset, self.current_remainder)
-        assert self.displayed is self.cur_buf, f"{where}: displaying the wrong buffer"
-        assert self.cur_buf.page == cur, (
-            f"{where}: SCREEN MISMATCH - showing {self.cur_buf.page}, position is {cur}")
-        if self.next_page_ready:
-            assert self.next_buf.page == (self.next_page_offset, self.next_page_remainder), (
-                f"{where}: next buffer holds {self.next_buf.page}, flag claims "
-                f"{(self.next_page_offset, self.next_page_remainder)}")
-        if self.prev_page_ready:
-            assert self.prev_buf.page == (self.prev_page_offset, self.prev_page_remainder), (
-                f"{where}: prev buffer holds {self.prev_buf.page}, flag claims "
-                f"{(self.prev_page_offset, self.prev_page_remainder)}")
-        bufs = [self.cur_buf, self.next_buf]
-        if self.QUICK_BACK_OK:
-            bufs.append(self.prev_buf)
+        ns = self.ns
+        cur = self.page
+        cur_buf = ns["current_rotated_buffer"]
+        next_buf = ns["next_rotated_buffer"]
+        prev_buf = ns["prev_rotated_buffer"]
+
+        assert self.displayed is cur_buf, f"{where}: displaying the wrong buffer"
+        assert cur_buf.page == cur, (
+            f"{where}: SCREEN MISMATCH - showing {cur_buf.page}, position is {cur}")
+        if ns["next_page_ready"]:
+            want = (ns["next_page_offset"], ns["next_page_remainder"])
+            assert next_buf.page == want, (
+                f"{where}: next buffer holds {next_buf.page}, flag claims {want}")
+        if ns["prev_page_ready"]:
+            want = (ns["prev_page_offset"], ns["prev_page_remainder"])
+            assert prev_buf.page == want, (
+                f"{where}: prev buffer holds {prev_buf.page}, flag claims {want}")
+        bufs = [cur_buf, next_buf] + ([prev_buf] if self.quick_back else [])
         assert len({id(b) for b in bufs}) == len(bufs), f"{where}: BUFFER ALIASING {bufs}"
 
 
 def check_font(font_file):
-    ns, font = load_engine(font_file)
     books = make_corpus()
     print(f"\n=== {font_file} ===")
 
@@ -251,50 +164,54 @@ def check_font(font_file):
             actions = [rng.choice(["down", "down", "down", "up", "up", "long"])
                        for _ in range(40)]
             for quick_back in (True, False):
-                r = Reader(ns, path, quick_back)
-                r.check("init")
+                ns, _ = load_engine(font_file)
+                e = Engine(ns, path, quick_back)
+                e.check("init")
                 for i, act in enumerate(actions):
                     if act == "up":
-                        r.page_up()
+                        e.page_up()
                     else:
-                        r.page_down(act == "long")
-                    r.check(f"{name} seed={seed} qb={quick_back} step {i} ({act})")
+                        e.page_down(act == "long")
+                    e.check(f"{name} seed={seed} qb={quick_back} step {i} ({act})")
                 steps += len(actions)
     print(f"  {steps} navigation steps: screen always matched position, "
           f"no aliasing, ready-flags honest")
 
     # forward then back returns to where it started
-    r = Reader(ns, books["large"])
-    start = r.cur_buf.page
+    ns, _ = load_engine(font_file)
+    e = Engine(ns, books["large"])
+    start = e.page
     for _ in range(6):
-        r.page_down()
-        r.check("roundtrip forward")
+        e.page_down()
+        e.check("roundtrip forward")
     for _ in range(6):
-        r.page_up()
-        r.check("roundtrip back")
-    assert r.cur_buf.page == start, f"round trip ended at {r.cur_buf.page}, expected {start}"
+        e.page_up()
+        e.check("roundtrip back")
+    assert e.page == start, f"round trip ended at {e.page}, expected {start}"
     print(f"  6 forward + 6 back returns to the starting page {start}")
 
     # quick-back really engages rather than silently falling back
-    r = Reader(ns, books["large"])
+    ns, _ = load_engine(font_file)
+    e = Engine(ns, books["large"])
     for _ in range(8):
-        r.page_down()
+        e.page_down()
     for _ in range(8):
-        r.page_up()
-    total = r.instant_backs + r.rendered_backs
+        e.page_up()
+    total = e.instant_backs + e.rendered_backs
     assert total > 0, "no back presses happened"
-    assert r.rendered_backs == 0, f"{r.rendered_backs} back press(es) had to re-render"
-    print(f"  quick-back engaged on {r.instant_backs}/{total} back presses")
+    assert e.rendered_backs == 0, f"{e.rendered_backs} back press(es) had to re-render"
+    print(f"  quick-back engaged on {e.instant_backs}/{total} back presses")
 
     # and it costs no extra rendering
     seq = ["down"] * 10 + ["up"] * 10
     costs = {}
     for quick_back in (True, False):
-        r = Reader(ns, books["large"], quick_back)
-        base = r.render_count
+        ns, _ = load_engine(font_file)
+        e = Engine(ns, books["large"], quick_back)
+        base = e.render_count
         for act in seq:
-            r.page_up() if act == "up" else r.page_down()
-        costs[quick_back] = r.render_count - base
+            e.page_up() if act == "up" else e.page_down()
+        costs[quick_back] = e.render_count - base
     assert costs[True] <= costs[False], (
         f"quick-back rendered more: {costs[True]} vs {costs[False]}")
     print(f"  renders for {len(seq)} presses: with quick-back {costs[True]}, "
