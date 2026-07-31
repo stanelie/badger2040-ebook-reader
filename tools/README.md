@@ -85,7 +85,7 @@ the project.
 
 ```
 # any TTF/OTF -> the reader's 1-bit bitmap format
-python3 tools/build_font.py <font.ttf> <out.pf> [size=13] [threshold=108] [weight=400]
+python3 tools/build_font.py <font.ttf> <out.pf> [size=13] [threshold=108] [weight=400] [maxbox=15]
 
 # repackage the original vga2_8x16 monospace font into the same format
 python3 tools/build_mono.py
@@ -102,3 +102,26 @@ python3 tools/build_mono.py
 Literata and Lexend Deca are SIL OFL; their licenses are in
 `circuitpython_version/`. A slightly heavier weight (500) is used for Lexend
 because its thin stems rasterise unevenly to 1-bit at this size.
+
+### Character coverage
+
+The fonts cover U+0020–U+00FF, so accented text (French, Spanish, German, …)
+renders directly instead of falling back to `?`. Two rules keep that from
+disturbing the layout:
+
+* **Accented capitals are stored as the plain letter** (É as E). Their
+  diacritics sit above cap height and would force a 17px glyph box instead of
+  15px, which at the 14px line pitch collides with descenders on the line
+  above. French routinely drops accents on capitals anyway.
+* **`maxbox` caps the glyph box.** If a font's natural extent still exceeds it,
+  rows are dropped from the top — never the bottom, so descenders such as the
+  cedilla French needs survive. Lexend loses one row this way, off the
+  Scandinavian `å` ring.
+
+Characters outside Latin-1 are mapped in `clean_word()` in `code.py`: the oe
+ligature becomes `oe`, curly quotes and dashes become ASCII, and a
+non-breaking space becomes a normal one.
+
+The old monospace font is CP437, not Latin-1 (`0x82` is `é`), so
+`build_mono.py` looks each codepoint up through the `cp437` codec. CP437 lacks
+ten uppercase accented letters; those fall back to the unaccented letter.

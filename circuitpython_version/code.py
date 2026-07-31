@@ -505,6 +505,37 @@ def get_storage_status():
 
 # ---------------- TEXT PROCESSING -----------------
 
+def clean_word(word):
+    """Map a word onto characters the fonts can actually draw.
+
+    The fonts cover U+0020-U+00FF, so accented letters (French, Spanish,
+    German, ...) render directly and only a few things need substituting:
+    typographic quotes and dashes, and the handful of characters outside
+    Latin-1 - notably the oe ligature, which is common in French.
+
+    Accented CAPITALS need nothing here: the fonts store them as the plain
+    letter, because their diacritics would sit above cap height and collide
+    with the line above (see tools/build_font.py).
+
+    The scan first means a pure-ASCII word - almost all of them - returns
+    immediately instead of building ten intermediate strings.
+    """
+    for ch in word:
+        if ch > "\x7e":
+            break
+    else:
+        return word
+
+    return (word.replace("“", '"').replace("”", '"')
+                .replace("‘", "'").replace("’", "'")
+                .replace("—", "-").replace("–", "-")
+                .replace("…", "...")
+                .replace("œ", "oe").replace("Œ", "OE")
+                .replace("Ÿ", "Y")
+                .replace(" ", " "))
+
+
+
 def _pixel_chunks(word, max_px):
     """Break an over-long word (wider than a full line) into pieces that each
     fit within max_px pixels. Used only as a fallback for tokens with no
@@ -616,8 +647,7 @@ def paginate_text(file_path, start_offset, remainder=b"", hyphenate=True):
                         word_count += 1
                         continue
                         
-                    word_clean = raw_word.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")\
-                               .replace("\u2014", "-").replace("\u2013", "-").replace("…", "...")
+                    word_clean = clean_word(raw_word)
 
                     # --- Over-long word (wider than a full line): hard-break it
                     # into pixel-sized chunks instead of overflowing off the

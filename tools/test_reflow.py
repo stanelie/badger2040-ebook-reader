@@ -20,16 +20,29 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import (LINES_PER_PAGE, TEXT_WIDTH, available_fonts, load_engine,
                       make_corpus, walk_pages)
 
-CLEANUP = (("“", '"'), ("”", '"'), ("’", "'"),
-           ("—", "-"), ("–", "-"), ("…", "..."))
+def source_words(path, clean_word):
+    """The book's words as paginate_text sees them.
 
-
-def source_words(path):
-    """The book's words as paginate_text sees them (same unicode cleanup)."""
+    Uses the engine's own clean_word() rather than a copy of the substitution
+    rules - keeping a duplicate list here went stale the moment the French
+    mappings were added, and reported a false failure.
+    """
     raw = open(path, "rb").read().decode("utf-8", "ignore")
-    for a, b in CLEANUP:
-        raw = raw.replace(a, b)
-    return raw.split()
+    words = []
+    for w in raw.split():
+        words.extend(clean_word(w).split())
+    return words
+
+
+def is_hyphen_break(line):
+    """True if the line ends in a hyphenation break - a '-' fused to the end of
+    a word, which continues on the next line.
+
+    A standalone dash is not one: French text turns em dashes into ' - ', so a
+    line can legitimately end with a space-separated '-' without anything being
+    split. Only the fused kind is unsafe at a page boundary.
+    """
+    return len(line) >= 2 and line.endswith(b"-") and line[-2:-1] != b" "
 
 
 def visible_words(pages):
@@ -72,14 +85,26 @@ def check_book(ns, font, name, path, strict=True):
             assert w <= TEXT_WIDTH, (
                 f"{name}: line {w}px > {TEXT_WIDTH}px at offset {off}: {ln!r}")
 
+    # 1b. every drawn character must exist in the font. Anything outside its
+    #     range renders as '?', which is how accented text used to look.
+    for off, _, lines, _ in pages:
+        for ln in lines:
+            for ch in ln.decode("utf-8"):
+                idx = ord(ch) - font.first
+                assert 0 <= idx < font.count, (
+                    f"{name}: {ch!r} (U+{ord(ch):04X}) is outside the font and "
+                    f"would render as '?' - it needs a glyph, or a mapping in "
+                    f"clean_word()")
+
     # 2. hyphenation never splits a word across a PAGE boundary (offset safety)
     hyph = 0
     for off, _, lines, _ in pages:
         nonempty = [l for l in lines if l]
-        hyph += sum(1 for l in nonempty if l.endswith(b"-"))
+        hyph += sum(1 for l in nonempty if is_hyphen_break(l))
         if nonempty:
-            assert not nonempty[-1].endswith(b"-"), (
-                f"{name}: word split across page boundary at offset {off}")
+            assert not is_hyphen_break(nonempty[-1]), (
+                f"{name}: word split across page boundary at offset {off}: "
+                f"{nonempty[-1]!r}")
 
     # 3. every page redraws identically from its own (offset, remainder).
     #    This is exactly what NVRAM resume relies on.
@@ -90,7 +115,7 @@ def check_book(ns, font, name, path, strict=True):
 
     # 4. the text itself survives: same words, same order, nothing lost or
     #    duplicated. Compared letters-only because a break may add a hyphen.
-    src = [w for w in (x.replace("-", "") for x in source_words(path)) if w]
+    src = [w for w in (x.replace("-", "") for x in source_words(path, ns["clean_word"])) if w]
     vis = [w for w in (x.replace("-", "") for x in visible_words(pages)) if w]
     si = vi = 0
     while si < len(src) and vi < len(vis):
@@ -146,7 +171,7 @@ def check_font(font_file):
                                       + font.char_width("b"))
 
     books = make_corpus()
-    for name in ("prose", "wrapped", "longwords", "large", "hyphenwords"):
+    for name in ("prose", "wrapped", "longwords", "large", "hyphenwords", "french"):
         check_book(ns, font, name, books[name])
 
     # the pathological token can't be drawn in full; we only require that

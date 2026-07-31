@@ -42,6 +42,7 @@ INACTIVITY_TIMEOUT_DEFAULT = 300
 # Anything touching the panel or the framebuffer is stubbed by the caller.
 EXTRACT = (
     "paginate_text", "find_previous_page", "_pixel_chunks", "_paragraph_start",
+    "clean_word",
     "history_push", "history_pop", "history_peek", "history_clear",
     "prerender_next", "prerender_prev",
     "nav_page_down", "nav_fast_advance", "nav_page_up",
@@ -153,6 +154,18 @@ def make_corpus():
         words[0] = words[0].capitalize()
         paras.append(textwrap.fill(" ".join(words) + ".", 72))
     write("large", "\n\n".join(paras) + "\n")
+
+    # G: French - accented lowercase, folded accented capitals, guillemets, the
+    # oe ligature and a non-breaking space, all of which have to survive
+    # pagination and end up as characters the fonts can actually draw.
+    write("french", (
+        "Il était une fois, à Noël, une élève naïve qui rêvait d'écrire un "
+        "chef-d'œuvre. « Où çà ? » demanda-t-elle, le cœur battant, déjà "
+        "âgée. ÉCOLE, ÊTRE et ÎLE en majuscules. La forêt française était "
+        "préférée des aînés — voilà ! Ça suffit : où ça ?\n\n"
+        "Les naïfs élèves préféraient goûter des crêpes brûlées près du "
+        "château, où l'aïeul räconte drôlement ses vieilles histoires.\n"
+    ) * 4)
 
     # F: already-hyphenated words, packed so many land at line ends
     write("hyphenwords", (
