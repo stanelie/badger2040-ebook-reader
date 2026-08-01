@@ -191,6 +191,15 @@ class UC8151:
         # Gather buffer for update_partial(), grown on demand.
         self._partial_scratch = None
 
+        # Set by update_partial(). A partial refresh only drives the pixels
+        # inside its window, so afterwards the panel's idea of the previous
+        # frame no longer matches the rest of the screen. In no-flickering mode
+        # the waveform only moves pixels it believes have changed, so the next
+        # FULL update would leave the old content showing through. The next
+        # full update therefore has to use the flickering waveform, which
+        # drives every pixel.
+        self._stale_after_partial = False
+
         # Swap width/height for user's framebuffer if rotation is 90 or 270
         if rotation in (90, 270):
             self.width = height
@@ -654,9 +663,17 @@ class UC8151:
             return False
 
         # Periodic full refresh for no-flickering mode
-        do_full_update = (self.full_update_period != 0 and 
-                         self.update_count % self.full_update_period == 0 and 
+        do_full_update = (self.full_update_period != 0 and
+                         self.update_count % self.full_update_period == 0 and
                          self.no_flickering)
+
+        # First full update after any partial one: the untouched pixels are not
+        # where the panel thinks they are, so drive all of them or the previous
+        # screen bleeds through (leaving the book picker visible under a page).
+        if self._stale_after_partial:
+            if self.no_flickering:
+                do_full_update = True
+            self._stale_after_partial = False
 
         if do_full_update:
             self.set_waveform_lut(min(2, self.speed), False)
@@ -791,6 +808,10 @@ class UC8151:
         self.write(CMD_PTOU)
         if not self.quick_update_mode:
             self.write(CMD_POF)
+
+        # Only this window was driven, so the next full update must repaint
+        # everything rather than trust the panel's previous frame.
+        self._stale_after_partial = True
 
         self.update_count += 1
         return True

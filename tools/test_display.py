@@ -237,6 +237,66 @@ def test_command_order():
     print("  [ok] command order is PON, PTIN, PTL, DTM2, DSP, DRF, PTOU")
 
 
+def test_full_update_after_partial_repaints_everything():
+    """A partial refresh only drives the pixels in its window.
+
+    In no-flickering mode the waveform only moves pixels it believes changed,
+    so without intervention the next FULL update leaves the untouched parts of
+    the previous screen showing through - opening a book from the picker left
+    picker rows mixed into the page. The first full update after any partial
+    one must use the flickering waveform, which drives every pixel, and then
+    go straight back to the fast one.
+    """
+    src = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
+    wanted = ("update", "update_partial", "_rotate_framebuffer", "send_image")
+    methods = {}
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.ClassDef) and node.name == "UC8151":
+            for m in node.body:
+                if isinstance(m, ast.FunctionDef) and m.name in wanted:
+                    methods[m.name] = ast.get_source_segment(src, m)
+
+    ns = {f"CMD_{k}": v for k, v in CMD.items()}
+    ns["CMD_DTM1"] = 0x10
+    exec("class D:\n" + "\n".join("    " + l for l in
+                                  "\n".join(methods.values()).splitlines()), ns)
+    d = ns["D"]()
+    d.rotation, d.width, d.height = 270, W, H
+    d.physical_width, d.physical_height = PHYS_W, PHYS_H
+    d._rotate_scratch = d._partial_scratch = None
+    d._stale_after_partial = False
+    d.quick_update_mode = True
+    d.no_flickering = True
+    d.full_update_period = 0        # how the reader configures it
+    d.speed, d.update_count = 4, 0
+    d.raw_fb = bytearray(W * H // 8)
+    d.wait_ready = lambda: None
+    d.is_busy = lambda: False
+    d.write = lambda c, data=None: None
+    luts = []
+    d.set_waveform_lut = lambda speed=None, no_flickering=None: luts.append(
+        (speed, no_flickering))
+
+    fb = bytes(W * H // 8)
+
+    luts.clear(); d.update(fb=fb)
+    assert luts == [], "a normal page turn should not change the waveform"
+
+    d.update_partial(0, 24, W, 32, fb)
+    assert d._stale_after_partial, "partial refresh did not flag the screen stale"
+
+    luts.clear(); d.update(fb=fb)
+    assert luts and luts[0][1] is False, (
+        "the full update after a partial one did not switch to the flickering "
+        "waveform - the previous screen would bleed through")
+    assert not d._stale_after_partial, "stale flag was not cleared"
+
+    luts.clear(); d.update(fb=fb)
+    assert luts == [], "the flickering waveform was not given back afterwards"
+    print("  [ok] first full update after a partial repaints everything, "
+          "then reverts to the fast waveform")
+
+
 def test_refuses_what_it_cannot_map():
     d = make_driver()
     fb = bytes(W * H // 8)
@@ -258,6 +318,7 @@ def main():
     test_full_region_equals_a_full_update()
     test_xor_band_equals_drawing_the_highlight()
     test_command_order()
+    test_full_update_after_partial_repaints_everything()
     test_refuses_what_it_cannot_map()
     print("\nALL DISPLAY CHECKS PASSED")
     print("\nNote: the SPI conversation itself is not verifiable off-device.")
