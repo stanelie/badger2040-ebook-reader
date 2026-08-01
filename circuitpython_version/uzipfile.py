@@ -69,6 +69,21 @@ class UZipFile:
         # eventually leaves no block big enough for zlib.decompress's output.
         self._zbuf = None
 
+    def reserve_read_buffer(self, size):
+        """Place the compressed-read buffer early, at a known size.
+
+        Otherwise it is created the first time something is read - in the
+        middle of the heap - and kept for reuse, permanently splitting the free
+        space in two. Sized once here, it sits alongside the window and leaves
+        the rest of the heap in one piece.
+        """
+        if size and (self._zbuf is None or len(self._zbuf) < size):
+            try:
+                self._zbuf = bytearray(size)
+            except MemoryError:
+                pass
+        return self._zbuf
+
     def ensure_window(self, size=32768):
         """Preallocate the streaming inflater's window.
 
@@ -252,7 +267,14 @@ class UZipFile:
                     out.write(buf)
                     remaining -= len(buf)
         else:
-            reader = self.get_reader(member)     # streams if it has to
+            # Going straight to a file, so there is nothing to gain from
+            # decompressing it whole - and doing so would need the compressed
+            # AND uncompressed sizes at once. A cover is barely compressible,
+            # so that is roughly twice its size in two big blocks. Stream it.
+            if entry["uncompressed_size"] > 16384 and self._window is not None:
+                reader = self._inflate_stream(data_start, entry["compressed_size"])
+            else:
+                reader = self.get_reader(member)  # streams if it has to
             try:
                 with open(dest_path, "wb") as out:
                     while True:

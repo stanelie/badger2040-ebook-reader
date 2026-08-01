@@ -561,17 +561,31 @@ def run_extraction(epub_path):
         # Ask for the streaming window as the archive opens, so it is placed
         # while the heap is whole rather than carved out of it later.
         with UZipFile(epub_full_path, window=32768) as uzf:
-            biggest = 0
+            # Size the compressed-read buffer from the members actually read -
+            # the HTML - and place it now, beside the window, so both long-lived
+            # buffers sit together instead of splitting the free space later.
+            biggest = big_csize = 0
             for e in uzf.filelist:
-                if e["compression_method"] == 8 and e["uncompressed_size"] > biggest:
-                    biggest = e["uncompressed_size"]
-            log_status("Largest deflated member: %d bytes; window %s"
-                       % (biggest, "ready" if uzf._window else "MISSING"))
+                nm = e["filename"].lower()
+                if nm.endswith((".html", ".htm", ".xhtml")):
+                    if e["uncompressed_size"] > biggest:
+                        biggest = e["uncompressed_size"]
+                    if e["compressed_size"] > big_csize:
+                        big_csize = e["compressed_size"]
+            uzf.reserve_read_buffer(big_csize)
+            log_status("Largest chapter %d bytes (%d compressed); window %s"
+                       % (biggest, big_csize, "ready" if uzf._window else "MISSING"))
             mem_note("After opening")
 
             # Cover next: if the text conversion runs into trouble later, at
             # least the cover is already saved.
             extract_cover(uzf, base_path)
+            try:
+                import gc
+                gc.collect()        # give back the manifest parsing scratch
+            except Exception:
+                pass
+            mem_note("After cover")
 
             numbered = []
             plain = []

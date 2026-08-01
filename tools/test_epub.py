@@ -392,6 +392,58 @@ def test_inflater_imported_up_front():
     print("  [ok] streaming inflater imported up front, not under pressure")
 
 
+def test_big_deflated_member_streams_to_file():
+    """A large DEFLATED member written to a file must not be decompressed whole.
+
+    Doing so needs the compressed AND uncompressed sizes at once, in two big
+    blocks - about 207KB for a 105KB cover. Covers are barely compressible, so
+    this is the realistic case, and it is what kept failing on the device:
+
+        Cover extraction failed (cover.jpeg -> 47308 bytes, method 8):
+            memory allocation failed
+    """
+    tmp = tempfile.mkdtemp()
+    blob = bytes((i * 7 + (i >> 3)) & 0xFF for i in range(60000))   # ~incompressible
+    p = os.path.join(tmp, "Big.epub")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("META-INF/container.xml",
+                   '<?xml version="1.0"?><container><rootfiles><rootfile '
+                   'full-path="OEBPS/content.opf"/></rootfiles></container>',
+                   zipfile.ZIP_DEFLATED)
+        z.writestr("OEBPS/ch1.xhtml", CHAPTER.format(title="One"), zipfile.ZIP_DEFLATED)
+        # DEFLATED on purpose - the case that needs streaming
+        z.writestr("OEBPS/images/cover.jpg", blob, zipfile.ZIP_DEFLATED)
+        z.writestr("OEBPS/content.opf",
+                   '<?xml version="1.0"?><package><metadata>'
+                   '<meta name="cover" content="cov"/></metadata><manifest>'
+                   '<item id="c0" href="ch1.xhtml"/>'
+                   '<item id="cov" href="images/cover.jpg" media-type="image/jpeg"/>'
+                   '</manifest><spine><itemref idref="c0"/></spine></package>',
+                   zipfile.ZIP_DEFLATED)
+
+    z = uzipfile.UZipFile(p, window=32768)
+    member = epub_xtract.find_cover_member(z)
+    assert member, "cover not found"
+    entry = z.entry_for(member)
+    assert entry["compression_method"] == 8, "test needs a deflated cover"
+
+    # zlib must not be reached at all for this one
+    real = uzipfile.zlib.decompress
+    used = []
+    uzipfile.zlib.decompress = lambda *a, **k: (used.append(1), real(*a, **k))[1]
+    try:
+        dest = os.path.join(tmp, "out.jpg")
+        z.extract_to(member, dest)
+    finally:
+        uzipfile.zlib.decompress = real
+    z.close()
+
+    assert open(dest, "rb").read() == blob, "streamed cover does not match"
+    assert not used, ("a big deflated member was decompressed whole instead of "
+                      "streamed - that needs two large contiguous blocks")
+    print("  [ok] big deflated members stream to file (no whole-member block)")
+
+
 def test_output_paginates_in_the_reader():
     """The point of the converter: its output has to feed the reader's engine."""
     from _harness import load_engine, walk_pages
@@ -425,6 +477,7 @@ def main():
     test_streaming_fallback_matches_zlib()
     test_inflater_handles_every_deflate_block_type()
     test_inflater_imported_up_front()
+    test_big_deflated_member_streams_to_file()
     test_output_paginates_in_the_reader()
     print("\nALL EPUB CHECKS PASSED")
     return 0
