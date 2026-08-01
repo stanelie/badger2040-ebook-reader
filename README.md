@@ -25,10 +25,13 @@ Converting an .epub (circuitpython version) :
 
   ```
   import supervisor
-  supervisor.set_next_code_file("epub_xtract.py")
+  supervisor.set_next_code_file("convert.py")
   supervisor.reload()
   ```
 - it runs by itself and prints progress; reset afterwards and the .txt is in the picker
+- if that does nothing, copy convert.py over code.py, reset, then put the reader back
+
+  `convert.py` is a two-line launcher; `epub_xtract.py` and `uzipfile.py` must be on the board too.
 
   It has to run with nothing else loaded: a chapter is decompressed whole (circuitpython has
   no streaming inflater) and the reader holds around 60KB of buffers, hyphenation patterns and

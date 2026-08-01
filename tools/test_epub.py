@@ -254,6 +254,34 @@ def test_streamer_does_not_reallocate_per_character():
     print("  [ok] streamer accumulates in bytearrays (no per-character allocation)")
 
 
+def test_entry_point_runs_without_a_name_guard():
+    """convert.py has to run whatever CircuitPython sets __name__ to.
+
+    Whether the file CircuitPython runs gets __name__ == "__main__" is not
+    documented, and when it does not, a guarded file just defines its functions
+    and exits - which looks exactly like nothing happening. convert.py
+    therefore calls main() at module level.
+    """
+    import ast
+    path = os.path.join(CPDIR, "convert.py")
+    assert os.path.exists(path), "convert.py entry point is missing"
+    src = open(path).read()
+    tree = ast.parse(src)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            test = ast.dump(node.test)
+            assert "__name__" not in test, (
+                "convert.py guards its work behind __name__ - it will silently "
+                "do nothing if CircuitPython does not set it to '__main__'")
+
+    calls = [n for n in tree.body
+             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)]
+    assert any(isinstance(c.value.func, ast.Attribute) and c.value.func.attr == "main"
+               for c in calls), "convert.py never calls main() at module level"
+    print("  [ok] convert.py runs regardless of __name__")
+
+
 def test_output_paginates_in_the_reader():
     """The point of the converter: its output has to feed the reader's engine."""
     from _harness import load_engine, walk_pages
@@ -283,6 +311,7 @@ def main():
     test_cover_extraction_streams_when_stored()
     test_missing_cover_is_not_fatal()
     test_streamer_does_not_reallocate_per_character()
+    test_entry_point_runs_without_a_name_guard()
     test_output_paginates_in_the_reader()
     print("\nALL EPUB CHECKS PASSED")
     return 0

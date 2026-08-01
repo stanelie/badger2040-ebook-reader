@@ -15,7 +15,7 @@
 #      board with nothing else loaded:
 #
 #        import supervisor
-#        supervisor.set_next_code_file("epub_xtract.py")
+#        supervisor.set_next_code_file("convert.py")
 #        supervisor.reload()
 #
 #      It runs by itself and prints its progress. Reset afterwards to go back
@@ -487,6 +487,7 @@ def run_extraction(epub_path):
 # -----------------------------------------------------------------
 def main():
     print("\n--- EPUB EXTRACTOR ---")
+    print("[EXTRACTOR] running from epub_xtract.main()")
     if not ensure_writable():
         return False
     epub = find_epub_file()
