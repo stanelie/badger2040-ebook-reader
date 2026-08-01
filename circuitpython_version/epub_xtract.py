@@ -554,8 +554,17 @@ def run_extraction(epub_path):
 
     try:
         with UZipFile(epub_full_path) as uzf:
-            # Cover first: it is cheap, and if the text conversion runs out of
-            # memory later at least the cover is already saved.
+            # Cover first: if the text conversion runs into trouble later, at
+            # least the cover is already saved. A deflated cover can be larger
+            # than any free block, so make sure the window exists first.
+            cov = find_cover_member(uzf)
+            if cov:
+                ce = uzf.entry_for(cov)
+                if ce and ce["compression_method"] == 8 and ce["uncompressed_size"] > 16384:
+                    try:
+                        uzf.ensure_window()
+                    except MemoryError:
+                        pass
             extract_cover(uzf, base_path)
 
             numbered = []
@@ -574,6 +583,26 @@ def run_extraction(epub_path):
             ordered = plain + [m for _, m in numbered]
             total = len(ordered)
             log_status("Files to process: %d" % total)
+
+            # Reserve the streaming inflater's window NOW, while the heap is
+            # still in one piece. Opening the archive and reading its manifest
+            # is enough to cut the largest free block from ~120KB to ~32KB, so
+            # a chapter that needs streaming would find no room for the window
+            # by the time it discovers it needs one.
+            biggest = 0
+            for m in ordered:
+                e = uzf.entry_for(m)
+                if e and e["uncompressed_size"] > biggest:
+                    biggest = e["uncompressed_size"]
+            if biggest > 16384:
+                try:
+                    uzf.ensure_window()
+                    log_status("Reserved a 32KB window (largest chapter %d bytes)"
+                               % biggest)
+                except MemoryError:
+                    log_status("Could not reserve the streaming window; large "
+                               "chapters may fail")
+            mem_note("After reserving")
 
             if not total:
                 log_status("No HTML files found")

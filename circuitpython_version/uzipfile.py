@@ -54,6 +54,27 @@ class UZipFile:
         # collector does not move objects to close them up - which is what
         # eventually leaves no block big enough for zlib.decompress's output.
         self._zbuf = None
+        # Sliding window for the streaming fallback, shared by every member.
+        # Allocated early on purpose - see ensure_window().
+        self._window = None
+
+    def ensure_window(self, size=32768):
+        """Preallocate the streaming inflater's window.
+
+        Worth calling straight after opening the archive, while the heap is
+        still whole. By the time a big chapter actually fails, the largest free
+        block can already be under 32KB - so allocating the window on demand
+        would fail exactly when it is needed.
+        """
+        if self._window is None:
+            self._window = bytearray(size)
+        return self._window
+
+    def _inflate_stream(self, data_start, csize):
+        """Streaming inflater over a member, for output too big to hold whole."""
+        from inflate import RawInflater
+        return RawInflater(FileSliceReader(self.fp, data_start, csize),
+                           window=self.ensure_window())
 
     def _read_compressed(self, data_start, size):
         """Read `size` compressed bytes, reusing one buffer where possible."""
@@ -185,11 +206,17 @@ class UZipFile:
             return FileSliceReader(self.fp, data_start, entry["compressed_size"])
 
         if entry["compression_method"] == 8:
-            compressed = self._read_compressed(data_start, entry["compressed_size"])
+            # zlib is far quicker, but it returns the whole member as one
+            # object; when no block that big is free, inflate it in a stream
+            # instead, which only needs the window.
             try:
-                return BytesIO(zlib.decompress(compressed, -15))
-            except TypeError:
-                return BytesIO(zlib.decompress(bytes(compressed), -15))
+                compressed = self._read_compressed(data_start, entry["compressed_size"])
+                try:
+                    return BytesIO(zlib.decompress(compressed, -15))
+                except TypeError:
+                    return BytesIO(zlib.decompress(bytes(compressed), -15))
+            except MemoryError:
+                return self._inflate_stream(data_start, entry["compressed_size"])
 
         raise NotImplementedError(
             "Compression method %d not supported" % entry["compression_method"])
@@ -215,9 +242,19 @@ class UZipFile:
                     out.write(buf)
                     remaining -= len(buf)
         else:
-            data = self.read(member)
-            with open(dest_path, "wb") as out:
-                out.write(data)
+            reader = self.get_reader(member)     # streams if it has to
+            try:
+                with open(dest_path, "wb") as out:
+                    while True:
+                        buf = reader.read(chunk)
+                        if not buf:
+                            break
+                        out.write(buf)
+            finally:
+                try:
+                    reader.close()
+                except Exception:
+                    pass
         return True
 
     # -----------------------------------------------------------------

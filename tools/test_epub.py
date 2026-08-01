@@ -282,6 +282,83 @@ def test_entry_point_runs_without_a_name_guard():
     print("  [ok] convert.py runs regardless of __name__")
 
 
+def test_streaming_fallback_matches_zlib():
+    """When no block big enough for zlib's output is free, uzipfile inflates in
+    a stream instead. Both paths must give the same bytes.
+
+    This is what lets a chapter larger than the biggest free block convert at
+    all - on a real book the largest block had fallen to ~30KB while chapters
+    ran to 49KB.
+    """
+    import hashlib, zlib as _zlib
+    tmp = tempfile.mkdtemp()
+    chapters = [(f"ch{i}.xhtml", f"Part{i}") for i in range(4)]
+    p = build_epub(os.path.join(tmp, "Book.epub"), chapters)
+
+    def digests(force_stream):
+        real = uzipfile.zlib.decompress
+        if force_stream:
+            def boom(*a, **k):
+                raise MemoryError("forced")
+            uzipfile.zlib.decompress = boom
+        try:
+            z = uzipfile.UZipFile(p)
+            z.ensure_window()
+            out = {}
+            for m in z.namelist():
+                if not m.lower().endswith((".xhtml", ".html")):
+                    continue
+                r = z.get_reader(m)
+                if force_stream:
+                    assert type(r).__name__ == "RawInflater", \
+                        "did not take the streaming path"
+                d = b""
+                while True:
+                    c = r.read(512)
+                    if not c:
+                        break
+                    d += c
+                out[m] = hashlib.sha256(d).hexdigest()
+            z.close()
+            return out
+        finally:
+            uzipfile.zlib.decompress = real
+
+    fast, slow = digests(False), digests(True)
+    assert fast and fast == slow, "streaming fallback differs from zlib"
+    print(f"  [ok] streaming fallback byte-identical to zlib ({len(fast)} members)")
+
+
+def test_inflater_handles_every_deflate_block_type():
+    """Stored, fixed-Huffman and dynamic-Huffman blocks, plus back-references
+    that overlap and that reach across the window."""
+    import io, zlib as _zlib, random
+    from inflate import RawInflater
+
+    def roundtrip(data, level):
+        c = _zlib.compressobj(level, _zlib.DEFLATED, -15)
+        comp = c.compress(data) + c.flush()
+        r = RawInflater(io.BytesIO(comp), chunk=64)
+        out = bytearray()
+        while True:
+            b = r.read(97)          # awkward size on purpose
+            if not b:
+                break
+            out += b
+        return bytes(out)
+
+    rnd = random.Random(5)
+    cases = [b"", b"x", b"ab" * 20000,
+             bytes(rnd.getrandbits(8) for _ in range(9000)),
+             b"a" * 40000,
+             bytes(rnd.getrandbits(8) for _ in range(4000)) * 10]
+    for data in cases:
+        for level in (0, 1, 9):     # 0 gives stored blocks
+            assert roundtrip(data, level) == data, \
+                f"inflate mismatch, {len(data)} bytes at level {level}"
+    print("  [ok] inflater matches zlib on stored/fixed/dynamic blocks")
+
+
 def test_output_paginates_in_the_reader():
     """The point of the converter: its output has to feed the reader's engine."""
     from _harness import load_engine, walk_pages
@@ -312,6 +389,8 @@ def main():
     test_missing_cover_is_not_fatal()
     test_streamer_does_not_reallocate_per_character()
     test_entry_point_runs_without_a_name_guard()
+    test_streaming_fallback_matches_zlib()
+    test_inflater_handles_every_deflate_block_type()
     test_output_paginates_in_the_reader()
     print("\nALL EPUB CHECKS PASSED")
     return 0

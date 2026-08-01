@@ -104,6 +104,12 @@ Covers the three ways an EPUB can declare its cover (EPUB3 `properties`, EPUB2
 sort numerically rather than lexically, and that the converted text paginates
 cleanly through the reader's own engine.
 
+It also checks `inflate.py`, the pure-Python streaming DEFLATE decoder used
+when no free block is big enough for `zlib.decompress`'s output, against zlib
+across stored / fixed-Huffman / dynamic-Huffman blocks, overlapping copies and
+window-crossing matches — and that forcing the fallback gives byte-identical
+results to the fast path.
+
 ## Font builders
 
 These need Pillow (`pip install Pillow`) and are only run when changing fonts.
