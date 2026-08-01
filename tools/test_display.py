@@ -133,6 +133,30 @@ def test_partial_window_bytes_and_registers():
     print(f"  [ok] partial window carries exactly the region's bytes ({len(regions)} regions)")
 
 
+def test_banded_and_pre_rotated_paths_agree():
+    """update_partial can either rotate just the band it needs, or gather from
+    a buffer the caller already rotated. Both must produce the same window."""
+    d = make_driver()
+    rnd = random.Random(21)
+    fb = bytes(rnd.getrandbits(8) for _ in range(W * H // 8))
+    rotated = reference_rotate(fb)
+
+    for (x, y, w, h) in [(0, 0, W, H), (0, 23, W, 32), (0, 16, W, 24),
+                         (0, 55, W, 17), (12, 40, 120, 16)]:
+        d.sent.clear(); d._rotate_scratch = None
+        assert d.update_partial(x, y, w, h, fb) is True
+        banded = dict(d.sent)[CMD["DTM2"]]
+
+        d.sent.clear()
+        assert d.update_partial(x, y, w, h, rotated, pre_rotated=True) is True
+        gathered = dict(d.sent)[CMD["DTM2"]]
+
+        assert banded == gathered, (
+            f"region {(x,y,w,h)}: rotating the band gives different bytes than "
+            f"gathering from a pre-rotated buffer")
+    print("  [ok] band-rotate and pre-rotated gather agree (5 regions)")
+
+
 def test_full_region_equals_a_full_update():
     """Asking for the whole screen must produce the whole framebuffer."""
     d = make_driver()
@@ -179,6 +203,7 @@ def main():
     print("e-ink driver:")
     test_rotation_matches_reference()
     test_partial_window_bytes_and_registers()
+    test_banded_and_pre_rotated_paths_agree()
     test_full_region_equals_a_full_update()
     test_command_order()
     test_refuses_what_it_cannot_map()

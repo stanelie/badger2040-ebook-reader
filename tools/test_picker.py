@@ -87,42 +87,41 @@ def test_select_button_checked_first():
     print("  [ok] select button is checked before up/down")
 
 
-def test_selection_moves_are_prerendered():
-    """Moving the selection must be a buffer swap, not a re-render.
+def test_no_page_buffer_cache():
+    """The picker must not cache a rendered screen per row.
 
-    Rendering on demand was tried and reverted: rotating the framebuffer is the
-    slowest loop in the project, so paying it on every keypress made the picker
-    take about a second per row. The rows of the current page are pre-rendered
-    instead, and only rebuilt when the visible page changes.
+    It used to, so that moving the selection was a buffer swap. Each screen is
+    4736 bytes and up to six were held at once - about 28KB - which ran the
+    device out of memory as soon as there were a few books:
+
+        MemoryError: memory allocation failed, allocating 4736 bytes
+
+    It renders on demand instead, which became affordable once the glyph
+    blitter and the rotation were sped up and partial refresh was added.
     """
-    node, seg = picker_source()
-    assert "selection_buffers" in seg, "picker no longer caches rendered rows"
-
-    # _draw_book_list must only be called while rebuilding the page cache,
-    # never from the button-handling path.
-    draw_calls = [c for c in ast.walk(node)
-                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                  and c.func.id == "_draw_book_list"]
-    assert draw_calls, "picker never renders the list"
-
-    for call in draw_calls:
-        # the enclosing statement must be inside the `offset != page_start`
-        # rebuild block, which is guarded by a comparison against page_start
-        enclosing = [nd for nd in ast.walk(node)
-                     if isinstance(nd, ast.If) and any(call is c for c in ast.walk(nd))]
-        guards = " ".join(ast.dump(nd.test) for nd in enclosing)
-        assert "page_start" in guards, (
-            "_draw_book_list is reachable outside the page-cache rebuild, so "
-            "moving the selection would re-render (slow)")
-    print("  [ok] selection moves swap a pre-rendered buffer (no re-render)")
-
-
-def test_page_cache_is_bounded():
-    """The cache holds at most one screen buffer per visible row."""
     _, seg = picker_source()
-    assert "min(per_page, len(books) - offset)" in seg, (
-        "page cache is not bounded to the visible rows")
-    print("  [ok] page cache bounded to per_page rows (~28KB max, freed on exit)")
+    assert "selection_buffers" not in seg, (
+        "picker caches a screen buffer per row again - this is what caused "
+        "MemoryError once more than a couple of books were installed")
+    assert "bytearray(" not in seg, (
+        "picker allocates a screen-sized buffer; it should draw into the "
+        "shared scratch frame")
+    print("  [ok] no per-row screen cache (the ~28KB that caused MemoryError)")
+
+
+def test_selection_moves_use_partial_refresh():
+    """Moving the selection should refresh only the band holding the two
+    highlight bars, not the whole panel."""
+    node, seg = picker_source()
+    calls = {c.func.attr for c in ast.walk(node)
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
+    assert "update_partial" in calls, (
+        "picker never asks for a partial refresh, so every selection move "
+        "repaints the whole screen")
+    assert "_draw_book_list" in seg, "picker never renders the list"
+    # and it must still be able to fall back
+    assert "update(" in seg, "picker has no full-refresh fallback"
+    print("  [ok] selection moves use a partial refresh, with a full fallback")
 
 
 def main():
@@ -130,8 +129,8 @@ def main():
     test_paging_matches_old_behaviour()
     test_selection_wraps_both_ways()
     test_select_button_checked_first()
-    test_selection_moves_are_prerendered()
-    test_page_cache_is_bounded()
+    test_no_page_buffer_cache()
+    test_selection_moves_use_partial_refresh()
     print("\nALL PICKER CHECKS PASSED")
     return 0
 

@@ -1075,71 +1075,55 @@ def file_picker():
 
     selected = 0
     per_page = 6
-    page_start = -1
-    selection_buffers = []
+    shown = None           # (page_start, row) currently on the panel
     needs_redraw = True
-    shown_row = None       # which row is currently on the panel
 
     while True:
-        offset = (selected // per_page) * per_page
-
-        if offset != page_start:
-            # Pre-render every row of this page, so moving the selection is a
-            # pure buffer swap. Rendering on demand instead was noticeably
-            # laggy: rotating the framebuffer is the slowest loop in the
-            # project and it would run on every keypress. This costs one screen
-            # buffer per visible row (up to 6 x 4736 = ~28KB) while the picker
-            # is open, freed when it closes - worth it for responsive
-            # navigation, which happens far more often than opening the picker.
-            selection_buffers = []
-            rows = min(per_page, len(books) - offset)
-            for row in range(rows):
-                rotated = _draw_book_list(books, offset + row, per_page)
-                selection_buffers.append(bytearray(rotated))
-            page_start = offset
-            needs_redraw = True
-            shown_row = None          # whole list changed, not just the highlight
-            gc.collect()
-
         if needs_redraw:
+            offset = (selected // per_page) * per_page
             row = selected - offset
-            if 0 <= row < len(selection_buffers):
-                buf = selection_buffers[row]
-                done = False
 
-                # Moving the selection only changes the two highlight bars, so
-                # refresh just the band that spans them instead of the whole
-                # screen. The cached buffers are already in panel orientation.
-                if (PARTIAL_UPDATES and not first_display_update
-                        and shown_row is not None and shown_row != row):
-                    lo = min(shown_row, row)
-                    hi = max(shown_row, row)
-                    band_y = 25 + lo * 16 - 2
-                    band_h = (25 + hi * 16 - 2 + 16) - band_y
-                    try:
-                        done = display.update_partial(0, band_y, WIDTH, band_h,
-                                                      fb=buf, pre_rotated=True)
-                    except Exception as e:
-                        print(f"partial update failed, using full: {e}")
-                        done = False
+            # Draw the list into the shared scratch frame. This used to cache a
+            # pre-rendered screen per visible row, which is 4736 bytes each and
+            # ran the device out of memory once there were a few books.
+            _draw_book_list(books, selected, per_page)
 
-                if not done:
-                    old_rot = display.rotation
-                    display.rotation = 0
+            # Only the two highlight bars differ from what is already on the
+            # panel, so refresh just the band spanning them. Rotating and
+            # refreshing that band is far cheaper than doing the whole screen.
+            done = False
+            if (PARTIAL_UPDATES and not first_display_update
+                    and shown is not None and shown[0] == offset and shown[1] != row):
+                lo = min(shown[1], row)
+                hi = max(shown[1], row)
+                band_y = 25 + lo * 16 - 2
+                band_h = (25 + hi * 16 - 2 + 16) - band_y
+                try:
+                    done = display.update_partial(0, band_y, WIDTH, band_h,
+                                                  fb=raw_working_buffer)
+                except Exception as e:
+                    print(f"partial update failed, using full: {e}")
+                    done = False
 
-                    # Full refresh if first display
-                    if first_display_update:
-                        display.set_speed(0, no_flickering=False)
-                        display.update(fb=buf)
-                        display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
-                        first_display_update = False
-                    else:
-                        display.update(fb=buf)
+            if not done:
+                rotated = display._rotate_framebuffer(raw_working_buffer)
+                old_rot = display.rotation
+                display.rotation = 0
 
-                    display.rotation = old_rot
+                # Full refresh if first display
+                if first_display_update:
+                    display.set_speed(0, no_flickering=False)
+                    display.update(fb=rotated)
+                    display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+                    first_display_update = False
+                else:
+                    display.update(fb=rotated)
 
-                shown_row = row
+                display.rotation = old_rot
+
+            shown = (offset, row)
             needs_redraw = False
+            gc.collect()
             led_off()
 
         # Check the select button FIRST. When it shared an if/elif chain with

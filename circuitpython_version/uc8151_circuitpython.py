@@ -727,22 +727,46 @@ class UC8151:
         bank = py >> 3
         row_bytes = self.physical_width >> 3   # 16
 
-        # `pre_rotated` lets a caller pass a buffer that is already in panel
-        # orientation (the book picker caches its screens that way).
-        if not pre_rotated and self.rotation != 0:
-            fb = self._rotate_framebuffer(fb)
-
-        # Gather the window into one contiguous buffer so it goes out as a
-        # single SPI transfer instead of `pw` small ones.
+        # One contiguous buffer, so the window goes out as a single SPI
+        # transfer instead of `pw` small ones.
         need = pw * cols
         if self._partial_scratch is None or len(self._partial_scratch) < need:
             self._partial_scratch = bytearray(need)
         out = self._partial_scratch
-        k = 0
-        for dx in range(pw):
-            start = (px + dx) * row_bytes + bank
-            out[k:k + cols] = fb[start:start + cols]
-            k += cols
+
+        if pre_rotated or self.rotation == 0:
+            # Caller supplied a buffer already in panel orientation; the window
+            # is a strided gather out of it.
+            k = 0
+            for dx in range(pw):
+                start = (px + dx) * row_bytes + bank
+                out[k:k + cols] = fb[start:start + cols]
+                k += cols
+        else:
+            # Rotate ONLY this band, straight into the window buffer. Rotating
+            # the whole screen just to copy a slice out of it is the dominant
+            # cost of a small update - a band a third of the screen high costs
+            # about a third as much.
+            for i in range(need):
+                out[i] = 0
+            src_row_bytes = self.width >> 3
+            for ly in range(y0, y1):
+                row_base = ly * src_row_bytes
+                bank_off = (ly >> 3) - bank
+                mask = 0x80 >> (ly & 7)          # constant for the row
+                for bx in range(x0 >> 3, (x1 + 7) >> 3):
+                    byte_val = fb[row_base + bx]
+                    if not byte_val:
+                        continue                  # blank byte
+                    base_x = bx << 3
+                    # Stepping one pixel right in logical x steps one whole
+                    # strip back in the window, so this is a subtraction.
+                    idx = (x1 - 1 - base_x) * cols + bank_off
+                    for bit in (0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01):
+                        if byte_val & bit:
+                            if 0 <= idx < need:
+                                out[idx] |= mask
+                        idx -= cols
 
         window = bytes([
             py & 0xFF,                      # bank axis start (pixels, x8)
