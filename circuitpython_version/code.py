@@ -926,9 +926,9 @@ def render_page_to_buffer(page_offset, page_remainder, target_rotated_buffer):
     finally:
         gc.collect()
 
-    rotated_data = display._rotate_framebuffer(raw_working_buffer)
-    for i in range(len(target_rotated_buffer)):
-        target_rotated_buffer[i] = rotated_data[i]
+    # Slice assignment copies at C speed; the byte-at-a-time Python loop this
+    # replaces ran 4736 iterations on every page render.
+    target_rotated_buffer[:] = display._rotate_framebuffer(raw_working_buffer)
 
 def update_display_fast(rotated_buffer, blocking=True):
     old_rot = display.rotation

@@ -60,26 +60,66 @@ class PropFont:
         W = fb.width
         H = fb.height
         stride = getattr(fb, "stride", W)  # bits per row; == width for MHMSB
+        row_bytes = stride >> 3
         first_n = extra_first
+
         for ch in s:
             adv, bw, off = self._rec(ch)
             rb = (bw + 7) // 8
-            for ry in range(box_h):
-                yy = y + ry
-                if yy < 0 or yy >= H:
-                    continue
-                rowbyte = (yy * stride) >> 3
-                base = off + ry * rb
-                for cx in range(bw):
-                    if d[base + (cx >> 3)] & (0x80 >> (cx & 7)):
-                        xx = x + cx
-                        if 0 <= xx < W:
-                            bi = rowbyte + (xx >> 3)
-                            mask = 0x80 >> (xx & 7)
-                            if color:
-                                buf[bi] |= mask
-                            else:
-                                buf[bi] &= ~mask & 0xFF
+            dst0 = x >> 3
+            shift = x & 7
+            nbytes = (shift + bw + 7) >> 3
+
+            # Fast path: shift each glyph row into place as a small integer and
+            # OR it into the 1-3 bytes it lands on, instead of testing and
+            # setting every pixel individually. Glyph drawing dominates the cost
+            # of rendering a page, and this turns ~8 operations per PIXEL into
+            # ~4 per destination BYTE.
+            if (color and rb <= 2 and x >= 0
+                    and dst0 + nbytes <= row_bytes):
+                # Source pixel 0 is the MSB of the first row byte, i.e. bit
+                # (rb*8-1). It has to land at bit (nbytes*8-1-shift) of the
+                # destination window; sh is the difference. Padding bits below
+                # the glyph width are zero, so OR-ing the whole window is safe.
+                sh = (nbytes << 3) - shift - (rb << 3)
+                for ry in range(box_h):
+                    yy = y + ry
+                    if yy < 0 or yy >= H:
+                        continue
+                    base = off + ry * rb
+                    v = d[base] if rb == 1 else ((d[base] << 8) | d[base + 1])
+                    if not v:
+                        continue                     # blank row - very common
+                    v = (v << sh) if sh >= 0 else (v >> -sh)
+                    bi = yy * row_bytes + dst0
+                    if nbytes == 1:
+                        buf[bi] |= v & 0xFF
+                    elif nbytes == 2:
+                        buf[bi] |= (v >> 8) & 0xFF
+                        buf[bi + 1] |= v & 0xFF
+                    else:
+                        buf[bi] |= (v >> 16) & 0xFF
+                        buf[bi + 1] |= (v >> 8) & 0xFF
+                        buf[bi + 2] |= v & 0xFF
+            else:
+                # Clipped at an edge, erasing, or an unusually wide glyph.
+                for ry in range(box_h):
+                    yy = y + ry
+                    if yy < 0 or yy >= H:
+                        continue
+                    rowbyte = yy * row_bytes
+                    base = off + ry * rb
+                    for cx in range(bw):
+                        if d[base + (cx >> 3)] & (0x80 >> (cx & 7)):
+                            xx = x + cx
+                            if 0 <= xx < W:
+                                bi = rowbyte + (xx >> 3)
+                                mask = 0x80 >> (xx & 7)
+                                if color:
+                                    buf[bi] |= mask
+                                else:
+                                    buf[bi] &= ~mask & 0xFF
+
             x += adv
             if ch == " ":
                 x += extra_each
