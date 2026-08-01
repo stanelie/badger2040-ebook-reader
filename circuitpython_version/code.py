@@ -1008,7 +1008,7 @@ def list_books():
         pass
     return sorted(books)
 
-def _draw_book_list(books, selected, per_page):
+def _draw_book_list(books, selected, per_page, highlight=True):
     """Draw the book list with `selected` highlighted and return the rotated
     buffer, ready to hand to display.update().
 
@@ -1031,8 +1031,13 @@ def _draw_book_list(books, selected, per_page):
                 name = name[:30] + "..."
             y = 25 + i * 16
 
-            if idx == selected:
-                display.fb.fill_rect(2, y - 2, WIDTH - 4, 16, 1)
+            if highlight and idx == selected:
+                # Bar starts one pixel BELOW the old y-2 so it covers exactly
+                # the rows the text can ink (y..y+14; row 15 of the 8x16 cell is
+                # always blank) and so consecutive bands tile without
+                # overlapping. That makes a highlighted row the exact inverse of
+                # an unhighlighted one, which is what _xor_row_band relies on.
+                display.fb.fill_rect(2, y - 1, WIDTH - 4, 16, 1)
                 display.text(name, 5, y, 0)
             else:
                 display.text(name, 5, y, 1)
@@ -1049,6 +1054,32 @@ def _draw_book_list(books, selected, per_page):
         temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
 
     return display._rotate_framebuffer(raw_working_buffer)
+
+
+def _xor_row_band(buf, row):
+    """Invert the highlight band for `row` inside a ROTATED screen buffer.
+
+    Highlighting a row is exactly inverting the pixels of its bar, so moving
+    the selection is two inversions - no redraw and no rotation. That matters:
+    on this device redrawing the list costs a few hundred milliseconds and
+    rotating it a hundred more, while a partial refresh does NOT shorten the
+    panel's refresh cycle (the waveform runs the same frames either way), so
+    that work is pure added latency.
+
+    The bands are laid out to make this cheap: row r covers logical rows
+    25+16r-1 .. +16, which is exactly two whole 8-pixel banks starting at
+    bank 3+2r, and consecutive rows never overlap. In the rotated buffer a
+    logical column becomes a row, so this walks the bar's x range and flips
+    two bytes each.
+    """
+    bank = 3 + 2 * row
+    row_bytes = display.physical_width >> 3      # 16
+    # The bar spans logical x 2..WIDTH-3; rotation maps x -> WIDTH-1-x, so that
+    # is rotated rows 2..WIDTH-3 as well.
+    for ny in range(2, WIDTH - 2):
+        base = ny * row_bytes + bank
+        buf[base] ^= 0xFF
+        buf[base + 1] ^= 0xFF
 
 
 def file_picker():
@@ -1075,55 +1106,62 @@ def file_picker():
 
     selected = 0
     per_page = 6
-    shown = None           # (page_start, row) currently on the panel
-    needs_redraw = True
+    page_shown = -1        # which page of books is on the panel
+    row_shown = None       # which row is highlighted on the panel
+    screen = None          # the page, rotated, ready for the panel
 
     while True:
-        if needs_redraw:
-            offset = (selected // per_page) * per_page
-            row = selected - offset
+        offset = (selected // per_page) * per_page
+        row = selected - offset
 
-            # Draw the list into the shared scratch frame. This used to cache a
-            # pre-rendered screen per visible row, which is 4736 bytes each and
-            # ran the device out of memory once there were a few books.
-            _draw_book_list(books, selected, per_page)
+        if offset != page_shown:
+            # New page of books: draw it once WITHOUT a highlight and rotate it
+            # once. `screen` is the driver's rotation buffer, so nothing else
+            # may rotate while the picker owns it.
+            _draw_book_list(books, selected, per_page, highlight=False)
+            screen = display._rotate_framebuffer(raw_working_buffer)
+            _xor_row_band(screen, row)          # apply the highlight
 
-            # Only the two highlight bars differ from what is already on the
-            # panel, so refresh just the band spanning them. Rotating and
-            # refreshing that band is far cheaper than doing the whole screen.
+            old_rot = display.rotation
+            display.rotation = 0
+            if first_display_update:
+                display.set_speed(0, no_flickering=False)
+                display.update(fb=screen)
+                display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+                first_display_update = False
+            else:
+                display.update(fb=screen)
+            display.rotation = old_rot
+
+            page_shown, row_shown = offset, row
+            gc.collect()
+            led_off()
+
+        elif row != row_shown:
+            # Same list, the highlight just moved. Flip the two bands - no
+            # redraw and no rotation, which is what keeps this quick.
+            _xor_row_band(screen, row_shown)    # remove the old highlight
+            _xor_row_band(screen, row)          # draw the new one
+
+            lo, hi = min(row_shown, row), max(row_shown, row)
+            band_y = 25 + lo * 16 - 1
+            band_h = (25 + hi * 16 - 1 + 16) - band_y
+
             done = False
-            if (PARTIAL_UPDATES and not first_display_update
-                    and shown is not None and shown[0] == offset and shown[1] != row):
-                lo = min(shown[1], row)
-                hi = max(shown[1], row)
-                band_y = 25 + lo * 16 - 2
-                band_h = (25 + hi * 16 - 2 + 16) - band_y
+            if PARTIAL_UPDATES:
                 try:
                     done = display.update_partial(0, band_y, WIDTH, band_h,
-                                                  fb=raw_working_buffer)
+                                                  fb=screen, pre_rotated=True)
                 except Exception as e:
                     print(f"partial update failed, using full: {e}")
                     done = False
-
             if not done:
-                rotated = display._rotate_framebuffer(raw_working_buffer)
                 old_rot = display.rotation
                 display.rotation = 0
-
-                # Full refresh if first display
-                if first_display_update:
-                    display.set_speed(0, no_flickering=False)
-                    display.update(fb=rotated)
-                    display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
-                    first_display_update = False
-                else:
-                    display.update(fb=rotated)
-
+                display.update(fb=screen)
                 display.rotation = old_rot
 
-            shown = (offset, row)
-            needs_redraw = False
-            gc.collect()
+            row_shown = row
             led_off()
 
         # Check the select button FIRST. When it shared an if/elif chain with
@@ -1137,13 +1175,11 @@ def file_picker():
         if button_pressed(buttons["down"]):
             last_activity = time.monotonic()
             selected = (selected + 1) % len(books)
-            needs_redraw = True
             time.sleep(0.15)
 
         elif button_pressed(buttons["up"]):
             last_activity = time.monotonic()
             selected = (selected - 1) % len(books)
-            needs_redraw = True
             time.sleep(0.15)
 
         # The picker runs its own polling loop, so it has to honour the

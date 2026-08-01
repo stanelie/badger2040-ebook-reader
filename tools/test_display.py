@@ -170,6 +170,57 @@ def test_full_region_equals_a_full_update():
     print("  [ok] a full-screen partial equals a normal full update (4736 bytes)")
 
 
+def test_xor_band_equals_drawing_the_highlight():
+    """The picker highlights a row by inverting its band in the ROTATED buffer,
+    instead of redrawing and re-rotating the screen.
+
+    That is only valid if inverting the band in rotated space is the same as
+    inverting the bar's rectangle in logical space before rotating. If the band
+    or its x range were off, the highlight would land on the wrong pixels - so
+    the two are compared here directly.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    xor_src = None
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_xor_row_band":
+            xor_src = ast.get_source_segment(src, node)
+    assert xor_src, "_xor_row_band not found"
+
+    class FakeDisplay:
+        physical_width = PHYS_W
+    ns = {"display": FakeDisplay(), "WIDTH": W}
+    exec(xor_src, ns)
+    xor_row_band = ns["_xor_row_band"]
+
+    rnd = random.Random(33)
+    clean = bytearray(rnd.getrandbits(8) for _ in range(W * H // 8))
+
+    for row in range(6):
+        # logical: invert the bar rectangle, then rotate
+        y0 = 25 + row * 16 - 1
+        y1 = y0 + 16
+        highlighted = bytearray(clean)
+        for y in range(y0, y1):
+            for x in range(2, W - 2):
+                highlighted[(y * W + x) >> 3] ^= 0x80 >> (x & 7)
+        want = reference_rotate(highlighted)
+
+        # rotated: rotate the clean screen, then invert the band
+        got = bytearray(reference_rotate(clean))
+        xor_row_band(got, row)
+
+        assert bytes(got) == want, (
+            f"row {row}: inverting the band in rotated space does not match "
+            f"inverting the bar before rotating")
+
+        # and it must be reversible - moving away restores the clean screen
+        xor_row_band(got, row)
+        assert bytes(got) == reference_rotate(clean), (
+            f"row {row}: inverting twice did not restore the original")
+    print("  [ok] band inversion == drawing the highlight, and is reversible "
+          "(6 rows)")
+
+
 def test_command_order():
     d = make_driver()
     fb = bytes(W * H // 8)
@@ -205,6 +256,7 @@ def main():
     test_partial_window_bytes_and_registers()
     test_banded_and_pre_rotated_paths_agree()
     test_full_region_equals_a_full_update()
+    test_xor_band_equals_drawing_the_highlight()
     test_command_order()
     test_refuses_what_it_cannot_map()
     print("\nALL DISPLAY CHECKS PASSED")
