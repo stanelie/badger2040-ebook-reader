@@ -126,16 +126,29 @@ class UZipFile:
         file_size = self.fp.tell()
 
         # ---- find End Of Central Directory (EOCD) -----------------
-        SEARCH = 65535 + 22
-        start = max(0, file_size - SEARCH)
-        self.fp.seek(start)
-        tail = self.fp.read(file_size - start)
+        # The EOCD is the last 22 bytes, plus any archive comment. A comment
+        # can in principle be 64KB, but EPUBs have none - so scan backwards in
+        # steps rather than pulling the 64KB worst case in. That read was the
+        # single largest allocation the converter made, bigger than any chapter,
+        # and it happened before anything else had a chance to settle.
+        eocd_start = -1
+        span = 0
+        for want in (1024, 4096, 16384, 65557):
+            if want <= span:
+                continue
+            span = want if want < file_size else file_size
+            self.fp.seek(file_size - span)
+            tail = self.fp.read(span)
+            pos = tail.rfind(b"\x50\x4b\x05\x06")
+            if pos >= 0:
+                eocd_start = file_size - span + pos
+                break
+            tail = None                      # release before growing the scan
+            if span >= file_size:
+                break
 
-        pos = tail.rfind(b"\x50\x4b\x05\x06")
-        if pos == -1:
+        if eocd_start < 0:
             raise OSError("Not a valid ZIP file (EOCD missing)")
-
-        eocd_start = start + pos
         self.fp.seek(eocd_start + 16)
         cd_offset = struct.unpack("<I", self.fp.read(4))[0]
 

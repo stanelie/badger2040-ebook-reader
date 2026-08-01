@@ -444,6 +444,49 @@ def test_big_deflated_member_streams_to_file():
     print("  [ok] big deflated members stream to file (no whole-member block)")
 
 
+def test_eocd_scan_does_not_grab_64k():
+    """Finding the end-of-central-directory must not read the 64KB worst case.
+
+    A ZIP comment can be 64KB, so the naive scan reads that much - the largest
+    single allocation the converter made, bigger than any chapter. Once the
+    streaming window was allocated first there was no longer room for it:
+
+        Error: memory allocation failed, allocating 65558 bytes
+
+    EPUBs have no comment, so a small scan finds it; it only grows if it must.
+    """
+    import ast
+    src = open(os.path.join(CPDIR, "uzipfile.py")).read()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.ClassDef) and node.name == "UZipFile":
+            for m in node.body:
+                if isinstance(m, ast.FunctionDef) and m.name == "_read_central_directory":
+                    seg = ast.get_source_segment(src, m)
+    assert "65535 + 22" not in seg, (
+        "central directory scan reads the 64KB worst case up front again")
+
+    # and it must still work whatever the comment size
+    tmp = tempfile.mkdtemp()
+    for clen in (0, 3000, 65000):
+        p = os.path.join(tmp, f"c{clen}.zip")
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr("a.txt", b"payload" * 200, zipfile.ZIP_DEFLATED)
+            zf.comment = b"x" * clen
+        z = uzipfile.UZipFile(p)
+        assert z.namelist() == ["a.txt"], f"comment {clen}: members lost"
+        assert z.read("a.txt") == b"payload" * 200, f"comment {clen}: bad read"
+        z.close()
+
+    bad = os.path.join(tmp, "bad.bin")
+    open(bad, "wb").write(b"not a zip" * 500)
+    try:
+        uzipfile.UZipFile(bad)
+        raise AssertionError("a non-zip was accepted")
+    except OSError:
+        pass
+    print("  [ok] EOCD scan starts small, grows only if needed, still validates")
+
+
 def test_output_paginates_in_the_reader():
     """The point of the converter: its output has to feed the reader's engine."""
     from _harness import load_engine, walk_pages
@@ -478,6 +521,7 @@ def main():
     test_inflater_handles_every_deflate_block_type()
     test_inflater_imported_up_front()
     test_big_deflated_member_streams_to_file()
+    test_eocd_scan_does_not_grab_64k()
     test_output_paginates_in_the_reader()
     print("\nALL EPUB CHECKS PASSED")
     return 0
