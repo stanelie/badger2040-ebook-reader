@@ -21,21 +21,18 @@ Usage :
 
 Converting an .epub (circuitpython version) :
 - copy the .epub into /books over USB as usual
-- at the REPL, launch the converter as its own program, so the reader is not loaded :
+- connect to the REPL (Thonny works) and run :
 
   ```
-  import supervisor
-  supervisor.set_next_code_file("convert.py")
-  supervisor.reload()
+  import epub_xtract
+  epub_xtract.main()
   ```
-- it runs by itself and prints progress; reset afterwards and the .txt is in the picker
-- if that does nothing, copy convert.py over code.py, reset, then put the reader back
+- reset when it finishes, and the .txt is in the picker
 
-  `convert.py` is a two-line launcher; `epub_xtract.py` and `uzipfile.py` must be on the board too.
-
-  It has to run with nothing else loaded: a chapter is decompressed whole (circuitpython has
-  no streaming inflater) and the reader holds around 60KB of buffers, hyphenation patterns and
-  fonts. Interrupting the reader to the REPL does not free that, so chapters fail to allocate.
+  It frees the reader's memory before starting. Reaching the REPL stops code.py but does not
+  release its globals - the page buffers, the 31KB of hyphenation patterns, the font, about
+  60KB - and a chapter has to be decompressed whole (circuitpython has no streaming inflater),
+  so that space is needed. Resetting afterwards rebuilds it all.
 
   Writing needs the filesystem, which the USB host normally owns - the reader never writes
   files, it keeps its position in NVRAM. On battery the converter takes it over by itself;

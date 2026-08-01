@@ -4,26 +4,22 @@
 # Converts an EPUB in /books into a .txt the reader can open, and saves the
 # cover image next to it.
 #
-# Run it with a CLEAN HEAP, not from the reader's REPL. A DEFLATE member has to
-# be decompressed whole (CircuitPython has no streaming inflater), and the
-# reader holds roughly 60KB in page buffers, hyphenation patterns and fonts.
-# Interrupting the reader to the REPL does NOT free that - the modules stay
-# loaded - so chapters fail to allocate.
+# Run it from the REPL - this works with Thonny, which holds the serial
+# connection and interrupts the board back to the prompt, so tricks like
+# supervisor.set_next_code_file() never get to run:
 #
-#   1. copy the .epub into /books over USB, as normal
-#   2. at the REPL, run the converter as the next program, which restarts the
-#      board with nothing else loaded:
+#     import epub_xtract
+#     epub_xtract.main()
 #
-#        import supervisor
-#        supervisor.set_next_code_file("convert.py")
-#        supervisor.reload()
-#
-#      It runs by itself and prints its progress. Reset afterwards to go back
-#      to the reader.
+# main() frees the reader's memory first. Interrupting code.py to reach the
+# REPL does NOT release its globals - the page buffers, the 31KB of
+# hyphenation patterns, the font, about 60KB in total - and without that space
+# a chapter cannot be decompressed (CircuitPython has no streaming inflater, so
+# each one is inflated whole). Reset afterwards and the reader rebuilds it all.
 #
 # Writing needs the filesystem, which the USB host normally owns. On battery
-# (or with the drive ejected) ensure_writable() takes it over by itself; while
-# plugged in, hold A while resetting so boot.py hands it over first.
+# the converter takes it over itself; while plugged in, hold A while resetting
+# so boot.py hands it over first.
 #
 # Output for "/books/Sway.epub":
 #   /books/Sway.txt         the text, blank line between paragraphs
@@ -46,6 +42,69 @@ def log_status(msg):
     if len(STATUS_HISTORY) > MAX_STATUS_LINES:
         STATUS_HISTORY = STATUS_HISTORY[-MAX_STATUS_LINES:]
     print("[EXTRACTOR] %s" % msg)
+
+
+# -----------------------------------------------------------------
+def free_reader_memory():
+    """Release whatever the reader is still holding.
+
+    Running this from the REPL leaves code.py's globals alive - the three page
+    buffers, the 31KB of hyphenation patterns, the font, the driver's rotation
+    scratch. None of it is needed here, and roughly 60KB is the difference
+    between chapters converting and failing to allocate.
+
+    Nothing is lost: reset afterwards and the reader rebuilds all of it.
+    """
+    try:
+        import gc
+    except ImportError:
+        gc = None
+    before = None
+    if gc is not None:
+        try:
+            before = gc.mem_free()      # CircuitPython only; absent on desktop
+        except Exception:
+            pass
+
+    dropped = 0
+
+    # The hyphenation pattern blob is the single biggest item.
+    try:
+        import hyphenator
+        if getattr(hyphenator, "_BLOB", None) is not None:
+            hyphenator._BLOB = None
+            dropped += 1
+    except Exception:
+        pass
+
+    # The reader's own buffers, if code.py has run.
+    try:
+        import __main__ as reader
+        for nm in ("raw_working_buffer", "current_rotated_buffer",
+                   "next_rotated_buffer", "prev_rotated_buffer",
+                   "_scratch_fb", "FONT"):
+            if getattr(reader, nm, None) is not None:
+                setattr(reader, nm, None)
+                dropped += 1
+        disp = getattr(reader, "display", None)
+        if disp is not None:
+            for nm in ("_rotate_scratch", "_partial_scratch"):
+                if getattr(disp, nm, None) is not None:
+                    setattr(disp, nm, None)
+                    dropped += 1
+    except Exception:
+        pass
+
+    if gc is not None:
+        gc.collect()                    # always collect, even without mem_free
+        if before is not None:
+            try:
+                after = gc.mem_free()
+                log_status("Freed %d bytes from the reader, %d now free"
+                           % (after - before, after))
+            except Exception:
+                pass
+    return dropped
 
 
 # -----------------------------------------------------------------
@@ -488,6 +547,7 @@ def run_extraction(epub_path):
 def main():
     print("\n--- EPUB EXTRACTOR ---")
     print("[EXTRACTOR] running from epub_xtract.main()")
+    free_reader_memory()
     if not ensure_writable():
         return False
     epub = find_epub_file()

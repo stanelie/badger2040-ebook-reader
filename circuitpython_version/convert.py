@@ -9,14 +9,16 @@
 # and exits - looking exactly like nothing happened. Code at module level runs
 # either way.
 #
-# From the REPL, with a clean heap (the reader stays unloaded):
+# Normally you do not need this file: from the REPL, just
 #
-#     import supervisor
-#     supervisor.set_next_code_file("convert.py")
-#     supervisor.reload()
+#     import epub_xtract
+#     epub_xtract.main()
 #
-# Or, if that does not run: copy this file over code.py, reset, and copy the
-# reader back afterwards.
+# which frees the reader's memory itself. This exists for running the converter
+# without the reader ever starting - copy it over code.py, reset, then put the
+# reader back. supervisor.set_next_code_file("convert.py") + supervisor.reload()
+# also works, but not under an IDE like Thonny, which holds the serial
+# connection and interrupts the board straight back to the prompt.
 #
 # Writing needs the filesystem, which the USB host normally owns. On battery
 # the converter takes it over itself; while plugged in, hold A while resetting
