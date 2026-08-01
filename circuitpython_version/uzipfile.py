@@ -49,6 +49,30 @@ class UZipFile:
     def __init__(self, filename):
         self.fp = open(filename, "rb")
         self.filelist = self._read_central_directory()
+        # Reused buffer for reading compressed members. Allocating a fresh one
+        # per chapter leaves a differently-sized hole each time, and the
+        # collector does not move objects to close them up - which is what
+        # eventually leaves no block big enough for zlib.decompress's output.
+        self._zbuf = None
+
+    def _read_compressed(self, data_start, size):
+        """Read `size` compressed bytes, reusing one buffer where possible."""
+        self.fp.seek(data_start)
+        if self._zbuf is None or len(self._zbuf) < size:
+            try:
+                self._zbuf = bytearray(size)
+            except MemoryError:
+                self._zbuf = None
+                return self.fp.read(size)       # fall back to a fresh read
+        try:
+            view = memoryview(self._zbuf)[:size]
+            got = self.fp.readinto(view)
+            if got == size:
+                return view
+        except Exception:
+            pass
+        self.fp.seek(data_start)
+        return self.fp.read(size)
 
     # -----------------------------------------------------------------
     def _read_central_directory(self):
@@ -128,16 +152,20 @@ class UZipFile:
     def read(self, member):
         """Whole member as bytes. Only for small files - the OPF, container.xml."""
         entry, data_start = self._get_entry(member)
-        self.fp.seek(data_start)
-        compressed = self.fp.read(entry["compressed_size"])
 
         if entry["compression_method"] == 0:
-            return compressed
+            self.fp.seek(data_start)
+            return self.fp.read(entry["compressed_size"])
 
         if entry["compression_method"] == 8:
+            compressed = self._read_compressed(data_start, entry["compressed_size"])
             # negative wbits selects raw DEFLATE (no zlib header), which is
             # what ZIP stores
-            return zlib.decompress(compressed, -15)
+            try:
+                return zlib.decompress(compressed, -15)
+            except TypeError:
+                # some builds want a real bytes object, not a memoryview
+                return zlib.decompress(bytes(compressed), -15)
 
         raise NotImplementedError(
             "Compression method %d not supported" % entry["compression_method"])
@@ -157,9 +185,11 @@ class UZipFile:
             return FileSliceReader(self.fp, data_start, entry["compressed_size"])
 
         if entry["compression_method"] == 8:
-            self.fp.seek(data_start)
-            compressed = self.fp.read(entry["compressed_size"])
-            return BytesIO(zlib.decompress(compressed, -15))
+            compressed = self._read_compressed(data_start, entry["compressed_size"])
+            try:
+                return BytesIO(zlib.decompress(compressed, -15))
+            except TypeError:
+                return BytesIO(zlib.decompress(bytes(compressed), -15))
 
         raise NotImplementedError(
             "Compression method %d not supported" % entry["compression_method"])

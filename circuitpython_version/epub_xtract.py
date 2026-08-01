@@ -31,6 +31,11 @@ from uzipfile import UZipFile
 
 # --- Configuration ------------------------------------------------
 TARGET_DIR = "books"
+# Print memory and member sizes as it goes. The interesting number is not how
+# much is free but how big the largest single block is: zlib.decompress has to
+# return one contiguous object, so a chapter fails when the largest block is
+# smaller than it needs, even with plenty free overall.
+VERBOSE = True
 MAX_STATUS_LINES = 6
 STATUS_HISTORY = []
 
@@ -42,6 +47,59 @@ def log_status(msg):
     if len(STATUS_HISTORY) > MAX_STATUS_LINES:
         STATUS_HISTORY = STATUS_HISTORY[-MAX_STATUS_LINES:]
     print("[EXTRACTOR] %s" % msg)
+
+
+# -----------------------------------------------------------------
+def largest_block(limit=200000):
+    """Biggest bytearray that can be allocated right now.
+
+    CircuitPython's collector does not move objects, so free memory gets split
+    into pieces. What matters for a big allocation is the largest single piece,
+    which mem_free() does not tell you - hence probing for it.
+    """
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+    best = 0
+    size = 1024
+    while size <= limit:                       # grow until it fails
+        try:
+            b = bytearray(size)
+            del b
+            best = size
+            size *= 2
+        except MemoryError:
+            break
+    lo, hi = best, min(best * 2, limit)        # then narrow down
+    while lo + 2048 < hi:
+        mid = (lo + hi) // 2
+        try:
+            b = bytearray(mid)
+            del b
+            lo = mid
+        except MemoryError:
+            hi = mid
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+    return lo
+
+
+def mem_note(label):
+    """Log free memory and the largest allocatable block."""
+    if not VERBOSE:
+        return
+    try:
+        import gc
+        gc.collect()
+        log_status("%s: %d free, largest block %d"
+                   % (label, gc.mem_free(), largest_block()))
+    except Exception:
+        pass
 
 
 # -----------------------------------------------------------------
@@ -79,7 +137,13 @@ def free_reader_memory():
 
     # The reader's own buffers, if code.py has run.
     try:
-        import __main__ as reader
+        try:
+            import __main__ as reader
+        except ImportError:
+            import sys
+            reader = sys.modules.get("__main__")
+        if reader is None:
+            raise ImportError("no __main__")
         for nm in ("raw_working_buffer", "current_rotated_buffer",
                    "next_rotated_buffer", "prev_rotated_buffer",
                    "_scratch_fb", "FONT"):
@@ -308,7 +372,12 @@ def extract_cover(uzf, base_path):
         log_status("Cover: %s -> %s (%d bytes)" % (member, dest, size))
         return dest
     except Exception as e:
-        log_status("Cover extraction failed: %s" % e)
+        ent = uzf.entry_for(member)
+        log_status("Cover extraction failed (%s -> %d bytes, method %d): %s"
+                   % (member[-24:],
+                      ent["uncompressed_size"] if ent else -1,
+                      ent["compression_method"] if ent else -1, e))
+        mem_note("  at cover failure")
         return None
 
 
@@ -511,9 +580,31 @@ def run_extraction(epub_path):
                 return False
 
             extracted = 0
+            failures = []
             with open(concat_path, "wb") as out:
                 for idx, member in enumerate(ordered, 1):
-                    log_status("[%d/%d] %s" % (idx, total, member[-24:]))
+                    # Reclaim the previous chapter before asking for the next.
+                    try:
+                        import gc
+                        gc.collect()
+                    except Exception:
+                        pass
+
+                    ent = uzf.entry_for(member)
+                    csize = ent["compressed_size"] if ent else 0
+                    usize = ent["uncompressed_size"] if ent else 0
+                    if VERBOSE:
+                        try:
+                            import gc
+                            log_status("[%d/%d] %s  %d->%d bytes, %d free, "
+                                       "largest %d"
+                                       % (idx, total, member[-20:], csize, usize,
+                                          gc.mem_free(), largest_block()))
+                        except Exception:
+                            log_status("[%d/%d] %s  %d->%d bytes"
+                                       % (idx, total, member[-20:], csize, usize))
+                    else:
+                        log_status("[%d/%d] %s" % (idx, total, member[-24:]))
                     try:
                         reader = uzf.get_reader(member)
                         stripper = HtmlToTextStreamer(reader)
@@ -526,8 +617,10 @@ def run_extraction(epub_path):
                         out.write(b"\n\n")
                         extracted += 1
                     except MemoryError:
-                        log_status("Out of memory on %s - run this standalone, "
-                                   "without the reader loaded" % member)
+                        failures.append((member, csize, usize))
+                        log_status("  OUT OF MEMORY needing ~%d contiguous "
+                                   "(largest block was %d)"
+                                   % (usize, largest_block()))
                         success = False
                     except Exception as e:
                         log_status("Failed %s: %s" % (member, e))
@@ -535,6 +628,10 @@ def run_extraction(epub_path):
 
             log_status("--- EXTRACTION COMPLETE ---")
             log_status("Combined %d/%d files -> %s" % (extracted, total, concat_path))
+            if failures:
+                log_status("%d chapter(s) could not be decompressed:" % len(failures))
+                for m, c, u in failures:
+                    log_status("   %s  %d compressed -> %d uncompressed" % (m, c, u))
             return success
 
     except Exception as e:
@@ -548,6 +645,7 @@ def main():
     print("\n--- EPUB EXTRACTOR ---")
     print("[EXTRACTOR] running from epub_xtract.main()")
     free_reader_memory()
+    mem_note("At start")
     if not ensure_writable():
         return False
     epub = find_epub_file()
