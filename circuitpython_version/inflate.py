@@ -16,6 +16,8 @@
 # It is much slower than the built-in, so it is meant as a fallback for the
 # occasional chapter that will not fit, not as the normal path.
 
+BUILD = "inflate-2 stored-blocks-stream"
+
 _MAXBITS = 15
 
 # RFC 1951 length/distance tables

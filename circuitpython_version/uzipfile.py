@@ -24,6 +24,9 @@ from io import BytesIO
 from inflate import RawInflater
 
 
+BUILD = "uzipfile-2 small-eocd-scan"
+
+
 class FileSliceReader:
     """Streaming reader over a slice of the archive (for stored members)."""
 

@@ -29,6 +29,12 @@ import time
 
 from uzipfile import UZipFile
 
+# Bound only to report their BUILD stamps below. Neither costs anything extra:
+# uzipfile is imported above, and it imports inflate at module level, so both
+# are already in sys.modules by the time these run.
+import uzipfile
+import inflate
+
 # --- Configuration ------------------------------------------------
 TARGET_DIR = "books"
 # Print memory and member sizes as it goes. The interesting number is not how
@@ -674,6 +680,12 @@ def run_extraction(epub_path):
 def main():
     print("\n--- EPUB EXTRACTOR ---")
     print("[EXTRACTOR] running from epub_xtract.main()")
+    # Print which build of each helper is actually loaded. CircuitPython caches
+    # modules in sys.modules, so calling main() again in the same REPL session
+    # re-runs whatever was imported first - copying new files to the drive
+    # changes nothing until a soft reboot. Two identical failure logs across a
+    # fix is the symptom; this line is how to tell without guessing.
+    print("[EXTRACTOR] build: %s | %s" % (uzipfile.BUILD, inflate.BUILD))
     free_reader_memory()
     mem_note("At start")
     if not ensure_writable():
