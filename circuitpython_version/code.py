@@ -310,6 +310,12 @@ BOOK_DIR = "/books"
 # pagination/offsets. Set False for a ragged right edge.
 JUSTIFY_TEXT = True
 
+# Refresh only the part of the screen that changed, where that is possible.
+# Used by the book picker, where moving the selection changes just the two
+# highlight bars. Partial refreshes leave a little more ghosting than full
+# ones; set False to go back to full refreshes everywhere.
+PARTIAL_UPDATES = True
+
 # Hyphenate words that overflow a line (Frank Liang's algorithm, on-device).
 # Fills lines more evenly and shrinks the gaps justification opens up. Only
 # applied within a page - a word is never split across a page boundary, so the
@@ -1072,6 +1078,7 @@ def file_picker():
     page_start = -1
     selection_buffers = []
     needs_redraw = True
+    shown_row = None       # which row is currently on the panel
 
     while True:
         offset = (selected // per_page) * per_page
@@ -1091,24 +1098,47 @@ def file_picker():
                 selection_buffers.append(bytearray(rotated))
             page_start = offset
             needs_redraw = True
+            shown_row = None          # whole list changed, not just the highlight
             gc.collect()
 
         if needs_redraw:
             row = selected - offset
             if 0 <= row < len(selection_buffers):
-                old_rot = display.rotation
-                display.rotation = 0
+                buf = selection_buffers[row]
+                done = False
 
-                # Full refresh if first display
-                if first_display_update:
-                    display.set_speed(0, no_flickering=False)
-                    display.update(fb=selection_buffers[row])
-                    display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
-                    first_display_update = False
-                else:
-                    display.update(fb=selection_buffers[row])
+                # Moving the selection only changes the two highlight bars, so
+                # refresh just the band that spans them instead of the whole
+                # screen. The cached buffers are already in panel orientation.
+                if (PARTIAL_UPDATES and not first_display_update
+                        and shown_row is not None and shown_row != row):
+                    lo = min(shown_row, row)
+                    hi = max(shown_row, row)
+                    band_y = 25 + lo * 16 - 2
+                    band_h = (25 + hi * 16 - 2 + 16) - band_y
+                    try:
+                        done = display.update_partial(0, band_y, WIDTH, band_h,
+                                                      fb=buf, pre_rotated=True)
+                    except Exception as e:
+                        print(f"partial update failed, using full: {e}")
+                        done = False
 
-                display.rotation = old_rot
+                if not done:
+                    old_rot = display.rotation
+                    display.rotation = 0
+
+                    # Full refresh if first display
+                    if first_display_update:
+                        display.set_speed(0, no_flickering=False)
+                        display.update(fb=buf)
+                        display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
+                        first_display_update = False
+                    else:
+                        display.update(fb=buf)
+
+                    display.rotation = old_rot
+
+                shown_row = row
             needs_redraw = False
             led_off()
 

@@ -188,6 +188,9 @@ class UC8151:
         # allocated a fresh bytes([cmd]) object just to hold one byte.
         self._cmd_buf = bytearray(1)
 
+        # Gather buffer for update_partial(), grown on demand.
+        self._partial_scratch = None
+
         # Swap width/height for user's framebuffer if rotation is 90 or 270
         if rotation in (90, 270):
             self.width = height
@@ -670,6 +673,101 @@ class UC8151:
             # Only power off if NOT in quick mode
             if not self.quick_update_mode:
                 self.write(CMD_POF)
+        self.update_count += 1
+        return True
+
+    def update_partial(self, x, y, w, h, fb=None, pre_rotated=False):
+        """Refresh only a rectangle of the display, in LOGICAL coordinates
+        (the same 296x128 space text is drawn in).
+
+        Only the pixels inside the window are driven, so this is much quicker
+        than a full refresh and leaves the rest of the screen untouched.
+
+        `y` and `h` are snapped outward to multiples of 8: the panel addresses
+        that axis in 8-pixel banks. `x`/`w` are exact.
+
+        The window is sent in the panel's own orientation. With rotation 270 a
+        logical horizontal band becomes a vertical strip on the panel, and our
+        rotated buffer is already laid out the way the panel wants it
+        (index = position_along_296 * 16 + bank), so the region is gathered
+        with plain slices.
+
+        Returns False if the request is empty or the geometry is unsupported,
+        in which case the caller should fall back to a full update.
+        """
+        if self.rotation != 270:
+            return False            # mapping below assumes the Badger's rotation
+
+        if fb is None:
+            fb = self.raw_fb
+
+        # Clip to the screen
+        x0 = max(0, x)
+        y0 = max(0, y)
+        x1 = min(self.width, x + w)
+        y1 = min(self.height, y + h)
+        if x1 <= x0 or y1 <= y0:
+            return False
+
+        # Snap the banked axis outward to whole 8-pixel banks
+        y0 &= ~7
+        y1 = (y1 + 7) & ~7
+        if y1 > self.height:
+            y1 = self.height
+
+        # Logical -> panel. The 128 axis is the logical y; the 296 axis runs
+        # backwards from the logical x (new_y = 295 - x), so the window start
+        # comes from the FAR edge of the logical rectangle.
+        py = y0
+        ph = y1 - y0
+        px = self.physical_height - x1
+        pw = x1 - x0
+
+        cols = ph >> 3                      # bytes per strip (128 axis)
+        bank = py >> 3
+        row_bytes = self.physical_width >> 3   # 16
+
+        # `pre_rotated` lets a caller pass a buffer that is already in panel
+        # orientation (the book picker caches its screens that way).
+        if not pre_rotated and self.rotation != 0:
+            fb = self._rotate_framebuffer(fb)
+
+        # Gather the window into one contiguous buffer so it goes out as a
+        # single SPI transfer instead of `pw` small ones.
+        need = pw * cols
+        if self._partial_scratch is None or len(self._partial_scratch) < need:
+            self._partial_scratch = bytearray(need)
+        out = self._partial_scratch
+        k = 0
+        for dx in range(pw):
+            start = (px + dx) * row_bytes + bank
+            out[k:k + cols] = fb[start:start + cols]
+            k += cols
+
+        window = bytes([
+            py & 0xFF,                      # bank axis start (pixels, x8)
+            (y1 - 1) & 0xFF,                # bank axis end, inclusive
+            (px >> 8) & 0xFF, px & 0xFF,    # long axis start
+            ((px + pw - 1) >> 8) & 0xFF, (px + pw - 1) & 0xFF,
+            0x01,                           # PT_SCAN
+        ])
+
+        self.wait_ready()
+        self.write(CMD_PON)
+        self.write(CMD_PTIN)                # enter partial mode
+        self.write(CMD_PTL, window)
+        self.write(CMD_DTM2, memoryview(out)[:need])
+        self.write(CMD_DSP)
+        self.write(CMD_DRF)
+        self.wait_ready()
+
+        # Leave partial mode. send_image() skips PTOU while quick updates are
+        # enabled, so without this a later full refresh would still be confined
+        # to this window.
+        self.write(CMD_PTOU)
+        if not self.quick_update_mode:
+            self.write(CMD_POF)
+
         self.update_count += 1
         return True
 

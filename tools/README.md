@@ -21,6 +21,7 @@ python3 tools/test_reflow.py          # text layout + pagination
 python3 tools/test_quickback.py       # page-navigation state machine
 python3 tools/test_power.py           # sleep / inactivity behaviour
 python3 tools/test_picker.py          # book picker paging + input loop
+python3 tools/test_display.py         # e-ink rotation + partial-update windows
 ```
 
 Both run against every installed `.pf` font by default; pass a font filename to
@@ -76,6 +77,19 @@ Proves the picker's derived paging matches the stateful version it replaced for
 every book count from 1 to 25, and structurally that the select button is read
 before up/down (in a shared if/elif chain, a button reading as held would block
 selection entirely) and that the per-row page buffers stay gone.
+
+### test_display.py
+
+The SPI conversation with the panel can only be verified on hardware; what this
+checks is everything deciding *which* bytes get sent. The 270° rotation is
+compared against a plain reference implementation, and for partial updates the
+bytes gathered for a region must be exactly the bytes that region occupies in a
+full-screen update, with the PTL registers describing the same rectangle.
+
+Partial updates address the panel in 8-pixel banks, so a requested band is
+snapped **outward**. The picker's highlight bands end at y=39/55/71 — snapping
+inward instead would quietly clip the bottom of the bar, so regions with
+unaligned ends are in the test set specifically.
 
 ## Font builders
 
