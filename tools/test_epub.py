@@ -227,21 +227,30 @@ def test_streamer_does_not_reallocate_per_character():
     """
     import ast
     src = open(os.path.join(CPDIR, "epub_xtract.py")).read()
-    seg = None
+    cls = None
     for node in ast.parse(src).body:
         if isinstance(node, ast.ClassDef) and node.name == "HtmlToTextStreamer":
-            seg = ast.get_source_segment(src, node)
-    assert seg, "HtmlToTextStreamer not found"
+            cls = node
+    assert cls, "HtmlToTextStreamer not found"
 
-    assert "bytes([byte])" not in seg, (
-        "streamer wraps each byte in a new bytes object again - one allocation "
-        "per character")
+    # Inspect the code, not the text - the docstring names the old pattern in
+    # order to explain it, and matching on source text flagged that instead.
+    for call in (n for n in ast.walk(cls) if isinstance(n, ast.Call)):
+        if isinstance(call.func, ast.Name) and call.func.id == "bytes":
+            assert not (call.args and isinstance(call.args[0], ast.List)), (
+                "streamer builds a bytes object from a list per byte again - "
+                "one allocation per character")
+
+    read = next((f for f in cls.body
+                 if isinstance(f, ast.FunctionDef) and f.name == "read"), None)
+    assert read, "read() not found"
+    seg = ast.get_source_segment(src, read)
     assert "result = bytearray()" in seg, (
-        "streamer accumulates into an immutable bytes again; that is quadratic "
+        "read() accumulates into an immutable bytes again; that is quadratic "
         "and fragments the heap")
     assert "self.buffer = self.buffer[i:]" not in seg, (
-        "streamer re-slices its input buffer per read, allocating a copy each "
-        "time; track a position instead")
+        "read() re-slices its input buffer each time, allocating a copy; "
+        "track a position instead")
     print("  [ok] streamer accumulates in bytearrays (no per-character allocation)")
 
 
