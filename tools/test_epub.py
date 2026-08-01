@@ -213,6 +213,38 @@ def test_missing_cover_is_not_fatal():
     print("  [ok] an EPUB with no cover still converts")
 
 
+def test_streamer_does_not_reallocate_per_character():
+    """The streamer must accumulate into bytearrays.
+
+    It originally built its output as an immutable bytes object one character
+    at a time - a fresh allocation per character, plus another for the
+    bytes([byte]) wrapper. On a 75-chapter book that churn fragmented the heap
+    badly enough that whole chapters failed to allocate:
+
+        MemoryError: memory allocation failed, allocating 47184 bytes
+
+    Roughly one allocation per 512-byte chunk now, instead of two per byte.
+    """
+    import ast
+    src = open(os.path.join(CPDIR, "epub_xtract.py")).read()
+    seg = None
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.ClassDef) and node.name == "HtmlToTextStreamer":
+            seg = ast.get_source_segment(src, node)
+    assert seg, "HtmlToTextStreamer not found"
+
+    assert "bytes([byte])" not in seg, (
+        "streamer wraps each byte in a new bytes object again - one allocation "
+        "per character")
+    assert "result = bytearray()" in seg, (
+        "streamer accumulates into an immutable bytes again; that is quadratic "
+        "and fragments the heap")
+    assert "self.buffer = self.buffer[i:]" not in seg, (
+        "streamer re-slices its input buffer per read, allocating a copy each "
+        "time; track a position instead")
+    print("  [ok] streamer accumulates in bytearrays (no per-character allocation)")
+
+
 def test_output_paginates_in_the_reader():
     """The point of the converter: its output has to feed the reader's engine."""
     from _harness import load_engine, walk_pages
@@ -241,6 +273,7 @@ def main():
     test_cover_found_all_three_ways()
     test_cover_extraction_streams_when_stored()
     test_missing_cover_is_not_fatal()
+    test_streamer_does_not_reallocate_per_character()
     test_output_paginates_in_the_reader()
     print("\nALL EPUB CHECKS PASSED")
     return 0

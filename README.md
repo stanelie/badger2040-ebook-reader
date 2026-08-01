@@ -21,13 +21,22 @@ Usage :
 
 Converting an .epub (circuitpython version) :
 - copy the .epub into /books over USB as usual
-- hold button A while resetting, so the board takes control of the filesystem and can write to it
-- at the REPL: `import epub_xtract; epub_xtract.main()`
-- reset normally, and the .txt is in the picker
+- at the REPL, launch the converter as its own program, so the reader is not loaded :
 
-  The converter runs on its own rather than from inside the reader: a chapter has to be
-  decompressed whole (circuitpython has no streaming inflater), and the reader is already
-  holding around 60KB of buffers, hyphenation patterns and fonts.
+  ```
+  import supervisor
+  supervisor.set_next_code_file("epub_xtract.py")
+  supervisor.reload()
+  ```
+- it runs by itself and prints progress; reset afterwards and the .txt is in the picker
+
+  It has to run with nothing else loaded: a chapter is decompressed whole (circuitpython has
+  no streaming inflater) and the reader holds around 60KB of buffers, hyphenation patterns and
+  fonts. Interrupting the reader to the REPL does not free that, so chapters fail to allocate.
+
+  Writing needs the filesystem, which the USB host normally owns - the reader never writes
+  files, it keeps its position in NVRAM. On battery the converter takes it over by itself;
+  while plugged in, hold button A while resetting so boot.py hands it over first.
 
 I like it!
 

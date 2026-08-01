@@ -4,16 +4,26 @@
 # Converts an EPUB in /books into a .txt the reader can open, and saves the
 # cover image next to it.
 #
-# Run it STANDALONE, not alongside the reader: a DEFLATE member has to be
-# decompressed whole (CircuitPython has no streaming inflater), and the reader
-# holds roughly 60KB in page buffers, hyphenation patterns and fonts. With the
-# reader loaded there is not enough left for a chapter.
+# Run it with a CLEAN HEAP, not from the reader's REPL. A DEFLATE member has to
+# be decompressed whole (CircuitPython has no streaming inflater), and the
+# reader holds roughly 60KB in page buffers, hyphenation patterns and fonts.
+# Interrupting the reader to the REPL does NOT free that - the modules stay
+# loaded - so chapters fail to allocate.
 #
 #   1. copy the .epub into /books over USB, as normal
-#   2. hold A while resetting - boot.py then hands the filesystem to
-#      CircuitPython, which is what lets this write to /books
-#   3. at the REPL:  import epub_xtract; epub_xtract.main()
-#   4. reset normally to read the .txt it produced
+#   2. at the REPL, run the converter as the next program, which restarts the
+#      board with nothing else loaded:
+#
+#        import supervisor
+#        supervisor.set_next_code_file("epub_xtract.py")
+#        supervisor.reload()
+#
+#      It runs by itself and prints its progress. Reset afterwards to go back
+#      to the reader.
+#
+# Writing needs the filesystem, which the USB host normally owns. On battery
+# (or with the drive ejected) ensure_writable() takes it over by itself; while
+# plugged in, hold A while resetting so boot.py hands it over first.
 #
 # Output for "/books/Sway.epub":
 #   /books/Sway.txt         the text, blank line between paragraphs
@@ -36,6 +46,50 @@ def log_status(msg):
     if len(STATUS_HISTORY) > MAX_STATUS_LINES:
         STATUS_HISTORY = STATUS_HISTORY[-MAX_STATUS_LINES:]
     print("[EXTRACTOR] %s" % msg)
+
+
+# -----------------------------------------------------------------
+def _writable():
+    """Can CircuitPython actually write to the filesystem right now?"""
+    probe = "/.epubtest"
+    try:
+        with open(probe, "wb") as f:
+            f.write(b"x")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_writable():
+    """Get write access to the filesystem, if it can be had.
+
+    The reader itself never writes files - it keeps its state in NVRAM - so the
+    board normally leaves the filesystem to the USB host, which is why this is
+    only ever a converter problem.
+
+    storage.remount() can hand it over at runtime, but only while the host does
+    not have write access. So on battery, or with the drive ejected, this just
+    works. Plugged in, the host holds it and boot.py has to do it instead
+    (hold A while resetting).
+    """
+    if _writable():
+        return True
+
+    try:
+        import storage
+        storage.remount("/", readonly=False)
+    except Exception as e:
+        log_status("remount failed: %s" % e)
+
+    if _writable():
+        log_status("Filesystem remounted read-write")
+        return True
+
+    log_status("Filesystem is read-only - cannot write the converted book.")
+    log_status("Either unplug USB and run on battery, or hold A while")
+    log_status("resetting so boot.py hands the filesystem to the board.")
+    return False
 
 
 # -----------------------------------------------------------------
@@ -204,17 +258,25 @@ class HtmlToTextStreamer:
     """Streams HTML out as plain text: strips tags, decodes the common
     entities, collapses whitespace, and puts a blank line between block
     elements - which is exactly the paragraph separation the reader's
-    pagination expects."""
+    pagination expects.
+
+    Everything accumulates into bytearrays. The original built its output as an
+    immutable bytes object one character at a time, which allocates a fresh
+    object per character (and another for the bytes([byte]) wrapper); on a
+    75-chapter book that churn was enough to fragment the heap into failed
+    allocations, quite apart from being slow.
+    """
 
     def __init__(self, underlying_reader):
         self.reader = underlying_reader
         self.in_tag = False
-        self.tag_buffer = b''
+        self.tag_buffer = bytearray()
         self.in_skip = False
         self.in_entity = False
-        self.entity_buffer = b''
+        self.entity_buffer = bytearray()
         self.last_was_space = False
         self.buffer = b''
+        self.pos = 0
 
         self.entities = {
             b'lt': b'<',
@@ -237,85 +299,94 @@ class HtmlToTextStreamer:
                   b'li', b'td', b'tr', b'blockquote', b'section')
 
     def read(self, size=512):
-        result = b''
+        result = bytearray()
         while len(result) < size:
-            if not self.buffer:
+            if self.pos >= len(self.buffer):
                 chunk = self.reader.read(size)
                 if not chunk:
                     break
                 self.buffer = chunk
+                self.pos = 0
 
-            i = 0
-            while i < len(self.buffer) and len(result) < size:
-                byte = self.buffer[i]
-                char = bytes([byte])
+            buf = self.buffer
+            n = len(buf)
+            i = self.pos
+            while i < n and len(result) < size:
+                byte = buf[i]
 
                 if self.in_skip:
                     if byte == 0x3C:            # '<'
                         self.in_tag = True
-                        self.tag_buffer = b''
+                        self.tag_buffer = bytearray()
                     elif self.in_tag:
                         if byte == 0x3E:        # '>'
                             self.in_tag = False
-                            tag_str = self.tag_buffer.lower()
-                            if tag_str == b'/script' or tag_str == b'/style':
+                            tag = self.tag_buffer.lower()
+                            if tag == b'/script' or tag == b'/style':
                                 self.in_skip = False
                         else:
-                            self.tag_buffer += char
+                            self.tag_buffer.append(byte)
                 else:
                     if byte == 0x3C:
                         self.in_tag = True
-                        self.tag_buffer = b''
+                        self.tag_buffer = bytearray()
                         self.last_was_space = True   # a tag separates words
                     elif self.in_tag:
                         if byte == 0x3E:
                             self.in_tag = False
-                            tag_str = self.tag_buffer.lower()
-                            if tag_str.startswith(b'script') or tag_str.startswith(b'style'):
+                            tag = self.tag_buffer.lower()
+                            if tag.startswith(b'script') or tag.startswith(b'style'):
                                 self.in_skip = True
-                            elif tag_str.startswith(b'/'):
-                                tag_name = tag_str[1:].split(b' ')[0]
-                                if tag_name in self.BLOCK_TAGS:
+                            elif tag.startswith(b'/'):
+                                name = tag[1:].split(b' ')[0]
+                                if name in self.BLOCK_TAGS:
                                     result += b'\n\n'
                                     self.last_was_space = True
-                            elif tag_str.startswith(b'br'):
+                            elif tag.startswith(b'br'):
                                 result += b'\n'
                                 self.last_was_space = True
-                            self.tag_buffer = b''
+                            self.tag_buffer = bytearray()
                         else:
-                            self.tag_buffer += char
+                            self.tag_buffer.append(byte)
                     else:
                         if self.in_entity:
                             if byte == 0x3B:    # ';'
-                                entity = self.entity_buffer.lower()
-                                repl = self.entities.get(
-                                    entity, b'&' + self.entity_buffer + b';')
-                                if repl != b' ' or not self.last_was_space:
+                                # bytes() because a bytearray cannot be a dict key
+                                entity = bytes(self.entity_buffer).lower()
+                                repl = self.entities.get(entity)
+                                if repl is None:
+                                    result += b'&'
+                                    result += self.entity_buffer
+                                    result += b';'
+                                    self.last_was_space = False
+                                elif repl != b' ' or not self.last_was_space:
                                     result += repl
                                     self.last_was_space = (repl == b' ')
                                 self.in_entity = False
-                                self.entity_buffer = b''
+                                self.entity_buffer = bytearray()
                             elif len(self.entity_buffer) > 10:
-                                # not an entity after all - flush it as text
-                                result += b'&' + self.entity_buffer + char
+                                # a bare '&' in the text, not an entity
+                                result += b'&'
+                                result += self.entity_buffer
+                                result.append(byte)
                                 self.in_entity = False
-                                self.entity_buffer = b''
+                                self.entity_buffer = bytearray()
                                 self.last_was_space = False
                             else:
-                                self.entity_buffer += char
+                                self.entity_buffer.append(byte)
                         elif byte == 0x26:      # '&'
                             self.in_entity = True
-                            self.entity_buffer = b''
+                            self.entity_buffer = bytearray()
                         elif byte in (32, 9, 10, 13):
                             if not self.last_was_space:
-                                result += b' '
+                                result.append(32)
                                 self.last_was_space = True
                         else:
-                            result += char
+                            result.append(byte)
                             self.last_was_space = False
                 i += 1
 
-            self.buffer = self.buffer[i:]
+            self.pos = i
 
         return result
 
@@ -416,6 +487,8 @@ def run_extraction(epub_path):
 # -----------------------------------------------------------------
 def main():
     print("\n--- EPUB EXTRACTOR ---")
+    if not ensure_writable():
+        return False
     epub = find_epub_file()
     if not epub:
         return False
