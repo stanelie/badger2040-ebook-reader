@@ -248,9 +248,14 @@ def _is_numbered_html(member):
 
 # ---------------- cover discovery --------------------------------
 def _attr(text, name):
-    """Value of attribute `name` in a tag fragment, or None."""
-    for quote in ('"', "'"):
-        key = name + "=" + quote
+    """Value of attribute `name` in a tag fragment, or None.
+
+    Works on bytes. Decoding the OPF to str would hold a second full-size copy
+    of it, and transient allocations that big are what leave the heap in
+    pieces.
+    """
+    for quote in (b'"', b"'"):
+        key = name + b"=" + quote
         i = text.find(key)
         if i >= 0:
             i += len(key)
@@ -261,15 +266,15 @@ def _attr(text, name):
 
 
 def _tags(xml, tag):
-    """Yield the text of each <tag ...> occurrence."""
+    """Each <tag ...> occurrence, as bytes."""
     out = []
-    needle = "<" + tag
+    needle = b"<" + tag
     i = 0
     while True:
         i = xml.find(needle, i)
         if i < 0:
             break
-        j = xml.find(">", i)
+        j = xml.find(b">", i)
         if j < 0:
             break
         out.append(xml[i:j])
@@ -278,7 +283,7 @@ def _tags(xml, tag):
 
 
 def _resolve(base_member, href):
-    """Resolve an href that is relative to the file it appeared in."""
+    """Resolve an href that is relative to the file it appeared in (str)."""
     if href.startswith("/"):
         return href.lstrip("/")
     base = base_member.rsplit("/", 1)[0] if "/" in base_member else ""
@@ -299,11 +304,11 @@ def find_cover_member(uzf):
 
     opf_name = None
     try:
-        container = uzf.read("META-INF/container.xml").decode("utf-8", "ignore")
-        for tag in _tags(container, "rootfile"):
-            path = _attr(tag, "full-path")
+        container = uzf.read("META-INF/container.xml")
+        for tag in _tags(container, b"rootfile"):
+            path = _attr(tag, b"full-path")
             if path:
-                opf_name = path
+                opf_name = path.decode("utf-8", "ignore")
                 break
     except Exception:
         pass
@@ -315,30 +320,30 @@ def find_cover_member(uzf):
 
     if opf_name:
         try:
-            opf = uzf.read(opf_name).decode("utf-8", "ignore")
-            items = _tags(opf, "item")
+            opf = uzf.read(opf_name)          # bytes; never decoded whole
+            items = _tags(opf, b"item")
 
             # EPUB 3: an item flagged as the cover image
             for tag in items:
-                props = _attr(tag, "properties") or ""
-                if "cover-image" in props:
-                    href = _attr(tag, "href")
+                props = _attr(tag, b"properties") or b""
+                if b"cover-image" in props:
+                    href = _attr(tag, b"href")
                     if href:
-                        return _resolve(opf_name, href)
+                        return _resolve(opf_name, href.decode("utf-8", "ignore"))
 
             # EPUB 2: <meta name="cover" content="some-id">
             cover_id = None
-            for tag in _tags(opf, "meta"):
-                if (_attr(tag, "name") or "").lower() == "cover":
-                    cover_id = _attr(tag, "content")
+            for tag in _tags(opf, b"meta"):
+                if (_attr(tag, b"name") or b"").lower() == b"cover":
+                    cover_id = _attr(tag, b"content")
                     if cover_id:
                         break
             if cover_id:
                 for tag in items:
-                    if _attr(tag, "id") == cover_id:
-                        href = _attr(tag, "href")
+                    if _attr(tag, b"id") == cover_id:
+                        href = _attr(tag, b"href")
                         if href:
-                            return _resolve(opf_name, href)
+                            return _resolve(opf_name, href.decode("utf-8", "ignore"))
         except Exception as e:
             log_status("OPF parse failed: %s" % e)
 
@@ -553,24 +558,16 @@ def run_extraction(epub_path):
     success = True
 
     try:
-        with UZipFile(epub_full_path) as uzf:
-            # Reserve the streaming window FIRST, before anything else has had
-            # a chance to break the heap up. Reading the manifest and parsing
-            # the OPF costs tens of KB and drops the largest free block from
-            # ~120KB to ~16KB, and the window cannot be carved out after that.
+        # Ask for the streaming window as the archive opens, so it is placed
+        # while the heap is whole rather than carved out of it later.
+        with UZipFile(epub_full_path, window=32768) as uzf:
             biggest = 0
             for e in uzf.filelist:
                 if e["compression_method"] == 8 and e["uncompressed_size"] > biggest:
                     biggest = e["uncompressed_size"]
-            if biggest > 16384:
-                try:
-                    uzf.ensure_window()
-                    log_status("Reserved a 32KB window (largest member %d bytes)"
-                               % biggest)
-                except MemoryError:
-                    log_status("Could not reserve the streaming window; large "
-                               "members may fail")
-            mem_note("After reserving")
+            log_status("Largest deflated member: %d bytes; window %s"
+                       % (biggest, "ready" if uzf._window else "MISSING"))
+            mem_note("After opening")
 
             # Cover next: if the text conversion runs into trouble later, at
             # least the cover is already saved.

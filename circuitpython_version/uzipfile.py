@@ -52,17 +52,22 @@ class FileSliceReader:
 class UZipFile:
     """Read-only ZIP archive supporting stored (0) and DEFLATE (8) members."""
 
-    def __init__(self, filename):
+    def __init__(self, filename, window=0):
         self.fp = open(filename, "rb")
+
+        # Take the streaming window BEFORE anything else is allocated, while
+        # the heap is still in one piece. It is long-lived, so putting it down
+        # first keeps it out of the way of everything that follows; carving it
+        # out later means taking 32KB from whatever the largest remaining block
+        # happens to be, which is exactly the space big members need.
+        self._window = bytearray(window) if window else None
+
         self.filelist = self._read_central_directory()
         # Reused buffer for reading compressed members. Allocating a fresh one
         # per chapter leaves a differently-sized hole each time, and the
         # collector does not move objects to close them up - which is what
         # eventually leaves no block big enough for zlib.decompress's output.
         self._zbuf = None
-        # Sliding window for the streaming fallback, shared by every member.
-        # Allocated early on purpose - see ensure_window().
-        self._window = None
 
     def ensure_window(self, size=32768):
         """Preallocate the streaming inflater's window.
