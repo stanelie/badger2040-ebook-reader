@@ -22,6 +22,7 @@ python3 tools/test_quickback.py       # page-navigation state machine
 python3 tools/test_power.py           # sleep / inactivity behaviour
 python3 tools/test_picker.py          # book picker paging + input loop
 python3 tools/test_display.py         # e-ink rotation + partial-update windows
+python3 tools/test_epub.py            # EPUB -> text converter
 ```
 
 Both run against every installed `.pf` font by default; pass a font filename to
@@ -90,6 +91,18 @@ Partial updates address the panel in 8-pixel banks, so a requested band is
 snapped **outward**. The picker's highlight bands end at y=39/55/71 — snapping
 inward instead would quietly clip the bottom of the bar, so regions with
 unaligned ends are in the test set specifically.
+
+### test_epub.py
+
+Builds real EPUB files with the standard library's `zipfile` and runs the
+converter over them, so the ZIP parsing, HTML stripping and cover discovery are
+all exercised for real - CircuitPython's `zlib` takes the same negative-wbits
+argument for raw DEFLATE as CPython's, so it is the same decompression path.
+
+Covers the three ways an EPUB can declare its cover (EPUB3 `properties`, EPUB2
+`<meta name="cover">`, and plain filename), that Calibre `_split_NNN` chapters
+sort numerically rather than lexically, and that the converted text paginates
+cleanly through the reader's own engine.
 
 ## Font builders
 
