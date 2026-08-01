@@ -21,6 +21,7 @@ from _harness import CPDIR
 sys.path.insert(0, CPDIR)
 import epub_xtract
 import uzipfile
+import inflate
 
 epub_xtract.log_status = lambda msg: None      # quiet
 
@@ -487,6 +488,50 @@ def test_eocd_scan_does_not_grab_64k():
     print("  [ok] EOCD scan starts small, grows only if needed, still validates")
 
 
+def test_stored_blocks_stream_instead_of_buffering():
+    """A stored DEFLATE block must honour the read size like a Huffman one.
+
+    Data that does not compress - an image - is emitted by the deflater as
+    *stored* blocks, up to 64KB each. Running one to completion buffers the
+    whole thing, which is the large allocation the streaming inflater exists to
+    avoid, so the cover failed while all 75 chapters went through:
+
+        Cover extraction failed (cover.jpeg -> 47308 bytes, method 8):
+        memory allocation failed, allocating 15659 bytes
+
+    Prose never shows this: it always compresses, so it never arrives stored.
+    """
+    import io, zlib, random
+    rng = random.Random(7)
+
+    class Tracked(inflate.RawInflater):
+        peak = 0
+        def _emit(self, b):
+            inflate.RawInflater._emit(self, b)
+            if len(self.out) > self.peak:
+                self.peak = len(self.out)
+
+    for size in (5000, 15659, 47308, 120000):
+        raw = bytes(rng.getrandbits(8) for _ in range(size))       # incompressible
+        for level in (0, 6):
+            c = zlib.compressobj(level, zlib.DEFLATED, -15)
+            z = c.compress(raw) + c.flush()
+            chunk = 1024
+            inf = Tracked(io.BytesIO(z), chunk=chunk)
+            out = bytearray()
+            while True:
+                b = inf.read(chunk)
+                if not b:
+                    break
+                out += b
+            assert bytes(out) == raw, f"{size}/{level}: output differs from zlib"
+            # a match can overshoot by one max-length copy, hence +258
+            assert inf.peak <= chunk + 258, (
+                f"{size}/{level}: buffered {inf.peak} bytes, expected <= {chunk + 258} "
+                "- a stored block is being run to completion again")
+    print("  [ok] stored blocks stream in bounded memory and match zlib exactly")
+
+
 def test_output_paginates_in_the_reader():
     """The point of the converter: its output has to feed the reader's engine."""
     from _harness import load_engine, walk_pages
@@ -522,6 +567,7 @@ def main():
     test_inflater_imported_up_front()
     test_big_deflated_member_streams_to_file()
     test_eocd_scan_does_not_grab_64k()
+    test_stored_blocks_stream_instead_of_buffering()
     test_output_paginates_in_the_reader()
     print("\nALL EPUB CHECKS PASSED")
     return 0

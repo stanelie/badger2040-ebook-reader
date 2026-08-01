@@ -69,7 +69,10 @@ class RawInflater:
         self.inpos = 0
         self.eof = False          # no more compressed input
         self.done = False         # final block consumed
-        self.state = None         # (kind, ...) mid-block resume info
+        self._last = 0            # current block is the final one
+        # Mid-block resume: (ltable, dtable) for a Huffman block, or
+        # (None, bytes-still-to-copy) for a stored one.
+        self.state = None
 
     # ---- input -------------------------------------------------------
     def _byte(self):
@@ -117,14 +120,28 @@ class RawInflater:
             self.wpos = 0
 
     # ---- blocks ------------------------------------------------------
-    def _stored(self):
-        self.bitbuf = 0
-        self.nbits = 0            # skip to a byte boundary
-        length = self._byte() | (self._byte() << 8)
-        self._byte()
-        self._byte()              # one's complement, not checked
-        for _ in range(length):
+    def _stored(self, want, remaining=None):
+        """Copy a stored (literal) block. True if finished, False if paused.
+
+        Must stop at `want` like a compressed block does. A stored block holds
+        up to 64KB, and running it to completion buffers all of it - precisely
+        the large allocation this class exists to avoid. It goes unnoticed on
+        prose, which always compresses and so never arrives stored; it bites on
+        an image, which does not compress and so arrives stored in full.
+        """
+        if remaining is None:
+            self.bitbuf = 0
+            self.nbits = 0        # skip to a byte boundary
+            remaining = self._byte() | (self._byte() << 8)
+            self._byte()
+            self._byte()          # one's complement, not checked
+        while remaining:
             self._emit(self._byte())
+            remaining -= 1
+            if remaining and len(self.out) >= want:
+                self.state = (None, remaining)   # None marks a stored block
+                return False
+        return True
 
     def _dynamic_tables(self):
         hlit = self._bits(5) + 257
@@ -194,16 +211,18 @@ class RawInflater:
             if self.state is not None:
                 ltable, dtable = self.state
                 self.state = None
-                if self._compressed(ltable, dtable, size):
-                    if self._last:
-                        self.done = True
+                if ltable is None:
+                    finished = self._stored(size, remaining=dtable)
+                else:
+                    finished = self._compressed(ltable, dtable, size)
+                if finished and self._last:
+                    self.done = True
                 continue
 
             self._last = self._bits(1)
             btype = self._bits(2)
             if btype == 0:
-                self._stored()
-                if self._last:
+                if self._stored(size) and self._last:
                     self.done = True
             elif btype == 1:
                 lt, dt = self._fixed_tables()
