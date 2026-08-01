@@ -17,6 +17,12 @@ import struct
 import zlib
 from io import BytesIO
 
+# Imported here rather than inside the fallback. Importing a module allocates
+# (this one costs ~14KB for its code objects and tables), and the fallback is
+# reached precisely when memory is tight - so a lazy import fails exactly when
+# it is needed. That is what stopped a large cover being extracted.
+from inflate import RawInflater
+
 
 class FileSliceReader:
     """Streaming reader over a slice of the archive (for stored members)."""
@@ -72,7 +78,6 @@ class UZipFile:
 
     def _inflate_stream(self, data_start, csize):
         """Streaming inflater over a member, for output too big to hold whole."""
-        from inflate import RawInflater
         return RawInflater(FileSliceReader(self.fp, data_start, csize),
                            window=self.ensure_window())
 

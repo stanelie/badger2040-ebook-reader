@@ -359,6 +359,39 @@ def test_inflater_handles_every_deflate_block_type():
     print("  [ok] inflater matches zlib on stored/fixed/dynamic blocks")
 
 
+def test_inflater_imported_up_front():
+    """uzipfile must import the streaming inflater at module level.
+
+    Importing a module allocates - inflate.py costs about 14KB for its code
+    objects and tables - and the fallback is reached exactly when memory is
+    short. A lazy import therefore fails at the one moment it is needed, which
+    is what stopped a 47KB cover being extracted:
+
+        Cover extraction failed: memory allocation failed, allocating 13848 bytes
+    """
+    import ast
+    src = open(os.path.join(CPDIR, "uzipfile.py")).read()
+    tree = ast.parse(src)
+
+    top = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                top.add(a.asname or a.name)
+    assert "RawInflater" in top or "inflate" in top, (
+        "uzipfile does not import the inflater at module level")
+
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef,)):
+            for node in ast.walk(fn):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    names = [a.name for a in node.names]
+                    assert not any("inflate" in n for n in names), (
+                        f"{fn.name}() imports the inflater lazily; it will fail "
+                        f"when memory is tight, which is when it is used")
+    print("  [ok] streaming inflater imported up front, not under pressure")
+
+
 def test_output_paginates_in_the_reader():
     """The point of the converter: its output has to feed the reader's engine."""
     from _harness import load_engine, walk_pages
@@ -391,6 +424,7 @@ def main():
     test_entry_point_runs_without_a_name_guard()
     test_streaming_fallback_matches_zlib()
     test_inflater_handles_every_deflate_block_type()
+    test_inflater_imported_up_front()
     test_output_paginates_in_the_reader()
     print("\nALL EPUB CHECKS PASSED")
     return 0

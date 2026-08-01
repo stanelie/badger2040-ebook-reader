@@ -554,17 +554,26 @@ def run_extraction(epub_path):
 
     try:
         with UZipFile(epub_full_path) as uzf:
-            # Cover first: if the text conversion runs into trouble later, at
-            # least the cover is already saved. A deflated cover can be larger
-            # than any free block, so make sure the window exists first.
-            cov = find_cover_member(uzf)
-            if cov:
-                ce = uzf.entry_for(cov)
-                if ce and ce["compression_method"] == 8 and ce["uncompressed_size"] > 16384:
-                    try:
-                        uzf.ensure_window()
-                    except MemoryError:
-                        pass
+            # Reserve the streaming window FIRST, before anything else has had
+            # a chance to break the heap up. Reading the manifest and parsing
+            # the OPF costs tens of KB and drops the largest free block from
+            # ~120KB to ~16KB, and the window cannot be carved out after that.
+            biggest = 0
+            for e in uzf.filelist:
+                if e["compression_method"] == 8 and e["uncompressed_size"] > biggest:
+                    biggest = e["uncompressed_size"]
+            if biggest > 16384:
+                try:
+                    uzf.ensure_window()
+                    log_status("Reserved a 32KB window (largest member %d bytes)"
+                               % biggest)
+                except MemoryError:
+                    log_status("Could not reserve the streaming window; large "
+                               "members may fail")
+            mem_note("After reserving")
+
+            # Cover next: if the text conversion runs into trouble later, at
+            # least the cover is already saved.
             extract_cover(uzf, base_path)
 
             numbered = []
@@ -584,25 +593,6 @@ def run_extraction(epub_path):
             total = len(ordered)
             log_status("Files to process: %d" % total)
 
-            # Reserve the streaming inflater's window NOW, while the heap is
-            # still in one piece. Opening the archive and reading its manifest
-            # is enough to cut the largest free block from ~120KB to ~32KB, so
-            # a chapter that needs streaming would find no room for the window
-            # by the time it discovers it needs one.
-            biggest = 0
-            for m in ordered:
-                e = uzf.entry_for(m)
-                if e and e["uncompressed_size"] > biggest:
-                    biggest = e["uncompressed_size"]
-            if biggest > 16384:
-                try:
-                    uzf.ensure_window()
-                    log_status("Reserved a 32KB window (largest chapter %d bytes)"
-                               % biggest)
-                except MemoryError:
-                    log_status("Could not reserve the streaming window; large "
-                               "chapters may fail")
-            mem_note("After reserving")
 
             if not total:
                 log_status("No HTML files found")
