@@ -148,7 +148,7 @@ class UC8151:
     def __init__(self, spi, *, cs, dc, rst, busy, width=128, height=296, speed=0, 
                  mirror_x=False, mirror_y=False, inverted=False, no_flickering=False, 
                  debug=False, full_update_period=50, dangerous_reaffirm_black=False,
-                 use_framebuf_font=False, font_path="font5x8.bin", rotation=0,
+                 use_framebuf_font=False, font_path="/.fonts/font5x8.bin", rotation=0,
                  ui_font=None):
         """
         Initialize the UC8151 e-ink display driver.

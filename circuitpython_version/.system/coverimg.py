@@ -40,6 +40,13 @@ ROTATE_COVER = True
 # reached only 56% of the screen. Centred, so it is the outside edges that go.
 FILL_SCREEN = True
 
+# Whether to put the cover on the panel at sleep at all. Off: at this size and
+# two levels a cover is not legible - a book is recognisable by its cover
+# across a room, not across 296x128 of dithered 1-bit. Everything that builds
+# one is still here and still runs, so turning this back on is the only change
+# needed if a later idea makes it work.
+USE_COVER_SLEEP_SCREEN = False
+
 # Ordered 4x4 dithering. On a panel with two levels, thresholding flat tone
 # makes a cover a silhouette; a dither matrix trades spatial detail for the
 # shading that is actually there. Cheap, and unlike error diffusion it needs no
@@ -157,16 +164,42 @@ def pack(get_pixel, src_w, src_h, out=None, width=WIDTH, height=HEIGHT,
     return out
 
 
+def _centre(text, y):
+    """One show_message item, centred for the 8px interface font."""
+    return (text, max(0, (WIDTH - len(text) * 8) // 2), y)
+
+
 def _sleep_message(reader):
-    """Say so on the panel when there is no cover to show.
+    """The sleep screen: which book, how far in, and that it is asleep.
 
     Leaving the last page up was the first idea, and it reads as a board that
     has not gone to sleep yet - there is no way to tell the two apart by
     looking, which is the one thing this screen is for.
     """
+    book = getattr(reader, "text_file", "") or ""
+    title = book.split("/")[-1]
+    if title.endswith(".txt"):
+        title = title[:-4]
+    if len(title) > 34:
+        title = title[:31] + "..."
+
+    where = ""
     try:
-        reader.show_message(("Sleeping...", 110, 30),
-                            ("press any key to wake", 60, 90))
+        size = os.stat(book)[6]
+        if size > 0:
+            pct = (getattr(reader, "current_offset", 0) * 100) // size
+            where = "%d%% read" % (0 if pct < 0 else 100 if pct > 100 else pct)
+    except Exception:
+        pass                              # no book, or it has gone away
+
+    items = [_centre("Sleeping...", 8)]
+    if title:
+        items.append(_centre(title, 40))
+    if where:
+        items.append(_centre(where, 64))
+    items.append(_centre("press any key to wake", 104))
+    try:
+        reader.show_message(*items)
     except Exception as e:
         print("[COVER] could not draw the sleep message: %s" % e)
     return False
@@ -190,6 +223,8 @@ def show_sleep_screen():
         reader = sys.modules.get("__main__")
     if reader is None:
         return False
+    if not USE_COVER_SLEEP_SCREEN:
+        return _sleep_message(reader)
     book = getattr(reader, "text_file", "")
     buf = getattr(reader, "raw_working_buffer", None)
     if not book or buf is None:

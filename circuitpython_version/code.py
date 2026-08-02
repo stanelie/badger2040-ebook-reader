@@ -3,6 +3,19 @@ CircuitPython E-book Reader for Badger 2040
 Fully on-the-fly pagination - no filesystem state storage
 State saved to NVRAM only
 """
+import sys
+
+# Everything except this file and boot.py lives in /.system, and the fonts in
+# /.fonts, so a mounted CIRCUITPY shows books rather than machinery. Dot-folders
+# are hidden by macOS and Linux; Windows uses a FAT attribute instead and shows
+# them regardless, which is cosmetic only.
+#
+# /lib stays on the path as well: it is where CircuitPython looks by default and
+# where adafruit_framebuf may still be.
+for _p in ("/.system", "/lib"):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import board
 import displayio
 import digitalio
@@ -110,30 +123,26 @@ except MemoryError:
     prev_rotated_buffer = None
     QUICK_BACK_OK = False
 
+# The guard that used to sit here warned when adafruit_framebuf.py was at the
+# drive root, shadowing lib/'s .mpy and costing ~30KB of RAM. It cannot happen
+# now: /lib and /.system both go on sys.path ahead of the root, so a stray copy
+# there is never reached.
+
+FONT_DIR = "/.fonts"
+UI_FONT = FONT_DIR + "/oldmono.pf"
+FRAMEBUF_FONT = FONT_DIR + "/font5x8.bin"
+
 # Report missing data files once, before they fail somewhere less obvious. A
 # missing module raises ImportError and names itself, so those need no check
 # here; these do not. font5x8.bin only surfaces from inside a text() call, and
 # a missing .pf font quietly falls back to another - so a half-copied drive can
 # look like a rendering or memory bug rather than a missing file.
-for _need in ("font5x8.bin", "hyphen_patterns.txt"):
+for _need in (FRAMEBUF_FONT, "/.system/hyphen_patterns.txt"):
     try:
         os.stat(_need)
     except OSError:
         print(f"MISSING FILE: {_need} - copy it from circuitpython_version/")
 
-# A library at the drive root shadows the copy in /lib, and CircuitPython
-# compiles a .py into RAM at import where an .mpy costs nothing. For
-# adafruit_framebuf that is roughly 30KB - enough on this board to lose the
-# quick-back buffer and fail a 3840-byte font load, neither of which points
-# anywhere near the actual cause.
-for _shadow in ("adafruit_framebuf.py",):
-    try:
-        os.stat(_shadow)
-        os.stat("lib/" + _shadow[:-3] + ".mpy")
-    except OSError:
-        continue
-    print(f"WASTING RAM: /{_shadow} shadows lib/{_shadow[:-3]}.mpy - "
-          f"delete /{_shadow} to get its memory back")
 
 # Optional on-device hyphenation. If the module or its pattern file is missing,
 # hyphenation is disabled gracefully (plain word-wrapping still works).
@@ -154,9 +163,9 @@ except Exception as _e:
 import propfont
 
 FONT_FILES = [
-    ("oldmono.pf", "Mono 8x16"),     # the original reader font (default)
-    ("literata.pf", "Literata"),
-    ("lexenddeca.pf", "Lexend Deca"),
+    (FONT_DIR + "/oldmono.pf", "Mono 8x16"),   # the original reader font
+    (FONT_DIR + "/literata.pf", "Literata"),
+    (FONT_DIR + "/lexenddeca.pf", "Lexend Deca"),
 ]
 AVAILABLE_FONTS = []
 for _fp, _fn in FONT_FILES:
@@ -166,7 +175,7 @@ for _fp, _fn in FONT_FILES:
     except Exception:
         pass
 if not AVAILABLE_FONTS:
-    AVAILABLE_FONTS = [("literata.pf", "Literata")]  # last resort; errors if truly missing
+    AVAILABLE_FONTS = [(FONT_DIR + "/literata.pf", "Literata")]  # last resort; errors if truly missing
 
 # One buffer, sized for the largest installed font and reused for every load.
 # Claimed now, with the screen buffers, while the heap is whole. Switching
@@ -203,7 +212,7 @@ FONT = None if PENDING_CONVERT else propfont.PropFont(AVAILABLE_FONTS[0][0], buf
 # instead of the 4KB vga2_8x16 kept resident for the same glyphs.
 _ui_font = None
 try:
-    _ui_font = propfont.PropFont("oldmono.pf", file_backed=True)
+    _ui_font = propfont.PropFont(UI_FONT, file_backed=True)
 except Exception as _e:
     print(f"interface font unavailable, falling back to font5x8: {_e}")
 
@@ -541,7 +550,7 @@ display = UC8151(
     # bytes out of.
     ui_font=_ui_font,
     use_framebuf_font=True,
-    font_path="font5x8.bin",
+    font_path=FRAMEBUF_FONT,
     speed=ORIGINAL_SPEED,
     no_flickering=ORIGINAL_NO_FLICKERING,
     full_update_period=0
@@ -1096,7 +1105,7 @@ def render_page_to_buffer(page_offset, page_remainder, target_rotated_buffer):
             if status_text:
                 STATUS_X = WIDTH - (len(status_text) * FONT_W_5X8) - TEXT_PADDING
                 STATUS_Y = TEXT_PADDING
-                temp_fb.text(status_text, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
+                temp_fb.text(status_text, STATUS_X, STATUS_Y, 1, font_name=FRAMEBUF_FONT)
 
             # Progress bar
             try:
@@ -1254,7 +1263,7 @@ def _draw_book_list(books, selected, per_page, highlight=True):
         storage_status = get_storage_status()
         STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING
         STATUS_Y = HEIGHT - FONT_H_5X8 - TEXT_PADDING
-        temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name="font5x8.bin")
+        temp_fb.text(storage_status, STATUS_X, STATUS_Y, 1, font_name=FRAMEBUF_FONT)
 
     return display._rotate_framebuffer(raw_working_buffer)
 
@@ -1318,7 +1327,7 @@ def convert_epub(epub_path):
         # piece of it over 1KB, failing on a 525-byte chapter. convert.py loads
         # the panel and the converter and nothing else.
         try:
-            supervisor.set_next_code_file("convert.py")
+            supervisor.set_next_code_file("/.system/convert.py")
         except Exception as e:
             print(f"set_next_code_file unavailable: {e}")
         supervisor.reload()          # does not return

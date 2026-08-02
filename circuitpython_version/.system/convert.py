@@ -25,7 +25,14 @@
 # Run by hand with nothing queued, it converts the first .epub in /books, which
 # is what it did before.
 import gc
+import sys
 import time
+
+# Run as the boot file by set_next_code_file, so the import path has to be set
+# up here too - code.py, which normally does it, is deliberately not loaded.
+for _p in ("/.system", "/lib"):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import board
 import microcontroller
@@ -124,7 +131,7 @@ display = UC8151(
     busy=board.INKY_BUSY,
     rotation=270,
     use_framebuf_font=True,
-    font_path="font5x8.bin",
+    font_path="/.fonts/font5x8.bin",
     speed=4,
     no_flickering=True,
     full_update_period=0,

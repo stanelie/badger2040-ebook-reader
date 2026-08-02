@@ -10,7 +10,7 @@ Gerard D.C. Kuiken). Algorithm after Ned Batchelder's public-domain
 hyphenate.py; this implementation reproduces its output exactly.
 """
 
-_PATTERNS_PATH = "hyphen_patterns.txt"
+_PATTERNS_PATH = "/.system/hyphen_patterns.txt"
 _LETTERS_MAX = 9  # longest pattern key (letters incl. boundary dots)
 
 # Words Knuth listed as exceptions (hyphen points precomputed).

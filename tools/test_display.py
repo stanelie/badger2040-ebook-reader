@@ -20,7 +20,7 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import CPDIR
+from _harness import CPDIR, FONTDIR, SYSDIR
 
 W, H = 296, 128            # logical (rotated) size
 PHYS_W, PHYS_H = 128, 296  # panel size
@@ -33,7 +33,7 @@ CMD = {"PON": 0x04, "PTIN": 0x91, "PTL": 0x90, "DTM2": 0x13,
 
 def make_driver():
     """A stub UC8151 carrying the real rotation and partial-update methods."""
-    src = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
+    src = open(os.path.join(SYSDIR, "uc8151_circuitpython.py")).read()
     wanted = ("update_partial", "_rotate_framebuffer", "ensure_scratch")
     methods = {}
     for node in ast.parse(src).body:
@@ -247,7 +247,7 @@ def test_full_update_after_partial_repaints_everything():
     one must use the flickering waveform, which drives every pixel, and then
     go straight back to the fast one.
     """
-    src = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
+    src = open(os.path.join(SYSDIR, "uc8151_circuitpython.py")).read()
     wanted = ("update", "update_partial", "_rotate_framebuffer",
               "send_image", "ensure_scratch")
     methods = {}
@@ -367,7 +367,7 @@ def test_rotation_scratch_is_claimed_before_optional_buffers():
             f"screen buffers are allocated after {later!r}; they must be "
             "claimed first, while the heap is still in one piece")
 
-    drv = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
+    drv = open(os.path.join(SYSDIR, "uc8151_circuitpython.py")).read()
     assert "def ensure_scratch(self)" in drv, "driver lost ensure_scratch()"
 
     # Moving the scratch earlier only helps if quick-back still absorbs the

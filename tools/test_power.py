@@ -13,10 +13,11 @@ that the picker's polling loop still calls check_inactivity at all.
 """
 import ast
 import os
+import tempfile
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import CPDIR, INACTIVITY_TIMEOUT_DEFAULT, load_engine
+from _harness import CPDIR, FONTDIR, SYSDIR, INACTIVITY_TIMEOUT_DEFAULT, load_engine
 
 
 class FakeClock:
@@ -185,7 +186,11 @@ def test_sleep_shows_the_cover_or_leaves_the_page():
     reader = _Reader()
     saved = sys.modules.get("__main__")
     sys.modules["__main__"] = reader
+    was_on = coverimg.USE_COVER_SLEEP_SCREEN
     try:
+        # The cover is off by default - see the test below - so turn it on to
+        # exercise the path at all.
+        coverimg.USE_COVER_SLEEP_SCREEN = True
         tmp = tempfile.mkdtemp()
         assert coverimg.show_sleep_screen() is False, (
             "claimed a cover with no book open")
@@ -228,6 +233,7 @@ def test_sleep_shows_the_cover_or_leaves_the_page():
             "on the panel for as long as the board is asleep")
         assert calls["speeds"][-1] == (4, True), "display speed not restored"
     finally:
+        coverimg.USE_COVER_SLEEP_SCREEN = was_on
         if saved is None:
             sys.modules.pop("__main__", None)
         else:
@@ -264,7 +270,7 @@ def test_sleep_frame_is_exactly_one_screen():
     # Writer and reader must derive that name the same way. They are both in
     # this module now, so check they go through the one helper rather than
     # spelling the suffix out twice.
-    ui = open(os.path.join(CPDIR, "coverimg.py")).read()
+    ui = open(os.path.join(SYSDIR, "coverimg.py")).read()
     for fn in ("show_sleep_screen", "render_for_book"):
         for node in ast.parse(ui).body:
             if isinstance(node, ast.FunctionDef) and node.name == fn:
@@ -457,6 +463,80 @@ def test_cover_fills_the_panel_and_crops_from_the_centre():
         "sitting in white margins")
     print("  [ok] covers fill the panel completely, cropped from the centre")
 
+def test_cover_sleep_screen_is_off_by_default():
+    """The cover is built and stored, but not shown.
+
+    At 296x128 and two levels a cover is not legible - recognisable across a
+    room, not across a dithered 1-bit thumbnail. Everything that renders one
+    still runs, so this is one flag away from coming back.
+
+    What the sleep screen shows instead is which book, how far in, and that it
+    is asleep.
+    """
+    sys.path.insert(0, CPDIR)
+    import coverimg
+
+    assert coverimg.USE_COVER_SLEEP_SCREEN is False, (
+        "the cover sleep screen is on again; it was turned off because the "
+        "image is not readable at this size")
+    # the machinery must still be there, not deleted
+    for name in ("render", "render_for_book", "pack", "main"):
+        assert callable(getattr(coverimg, name, None)), (
+            f"coverimg.{name} was removed; turning the cover back on should "
+            "be a one-flag change")
+
+    shown = []
+    book = os.path.join(tempfile.mkdtemp(), "The Last Town.txt")
+    open(book, "wb").write(b"x" * 200)
+
+    class R:
+        text_file = book
+        current_offset = 0
+        raw_working_buffer = bytearray(4736)
+
+        @staticmethod
+        def show_message(*items):
+            shown.append([t for t, _x, _y in items])
+
+    saved = sys.modules.get("__main__")
+    sys.modules["__main__"] = R
+    try:
+        for offset, expect in ((0, "0%"), (50, "25%"), (200, "100%")):
+            R.current_offset = offset
+            shown.clear()
+            assert coverimg.show_sleep_screen() is False
+            lines = shown[0]
+            assert any("Sleeping" in l for l in lines), (
+                "the sleep screen no longer says it is asleep")
+            assert any("The Last Town" == l for l in lines), (
+                f"the book title is missing: {lines}")
+            assert any(expect in l for l in lines), (
+                f"at offset {offset} of 200 the screen should say {expect}, "
+                f"got {lines}")
+
+        # a position past the end must not read as more than 100%
+        R.current_offset = 10_000
+        shown.clear()
+        coverimg.show_sleep_screen()
+        assert any("100%" in l for l in shown[0]), (
+            f"a position past the end reported {shown[0]}")
+
+        # a long title has to be cut, not run off the panel
+        long_book = os.path.join(tempfile.mkdtemp(),
+                                 "A" * 80 + ".txt")
+        open(long_book, "wb").write(b"x" * 10)
+        R.text_file = long_book
+        shown.clear()
+        coverimg.show_sleep_screen()
+        assert all(len(l) <= 36 for l in shown[0]), (
+            f"a long title was not shortened: {shown[0]}")
+    finally:
+        if saved is None:
+            sys.modules.pop("__main__", None)
+        else:
+            sys.modules["__main__"] = saved
+    print("  [ok] sleep screen shows title and progress; cover stays off")
+
 def main():
     print("sleep / inactivity behaviour:")
     test_stays_awake_before_timeout()
@@ -470,6 +550,7 @@ def main():
     test_cover_fits_the_panel_and_dithers()
     test_cover_is_turned_counter_clockwise_to_fill_the_panel()
     test_cover_fills_the_panel_and_crops_from_the_centre()
+    test_cover_sleep_screen_is_off_by_default()
     print("\nALL POWER CHECKS PASSED")
     return 0
 

@@ -16,7 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import CPDIR
+from _harness import CPDIR, FONTDIR, SYSDIR
 
 PER_PAGE = 6
 
@@ -139,9 +139,9 @@ def test_shared_font_buffer_loads_identically():
     before it, so each font is checked against a standalone load.
     """
     import propfont
-    fonts = [f for f in os.listdir(CPDIR) if f.endswith(".pf")]
+    fonts = [f for f in os.listdir(FONTDIR) if f.endswith(".pf")]
     assert fonts, "no .pf fonts installed"
-    biggest = max(os.path.getsize(os.path.join(CPDIR, f)) for f in fonts)
+    biggest = max(os.path.getsize(os.path.join(FONTDIR, f)) for f in fonts)
     buf = bytearray(biggest)
 
     sample = "The quick brown fox; ijl WM 1234 -- Hamburgefonstiv"
@@ -149,7 +149,7 @@ def test_shared_font_buffer_loads_identically():
     # previous font rather than a blank buffer
     for round_ in range(2):
         for name in fonts:
-            path = os.path.join(CPDIR, name)
+            path = os.path.join(FONTDIR, name)
             shared = propfont.PropFont(path, buf=buf)
             alone = propfont.PropFont(path)
             assert shared.text_width(sample) == alone.text_width(sample), (
@@ -165,12 +165,12 @@ def test_shared_font_buffer_loads_identically():
     # the buffer must be big enough for every font, or a switch silently
     # truncates the largest one
     for name in fonts:
-        size = os.path.getsize(os.path.join(CPDIR, name))
+        size = os.path.getsize(os.path.join(FONTDIR, name))
         assert size <= len(buf), f"{name} ({size}) exceeds the buffer ({len(buf)})"
 
     # a short buffer must be rejected, not quietly produce a broken font
     try:
-        propfont.PropFont(os.path.join(CPDIR, fonts[0]), buf=bytearray(2))
+        propfont.PropFont(os.path.join(FONTDIR, fonts[0]), buf=bytearray(2))
         raise AssertionError("a 2-byte buffer was accepted as a font")
     except ValueError:
         pass
@@ -182,7 +182,7 @@ def test_shared_font_buffer_loads_identically():
     import tempfile
     empty = os.path.join(tempfile.mkdtemp(), "empty.pf")
     open(empty, "wb").close()
-    propfont.PropFont(os.path.join(CPDIR, fonts[0]), buf=buf)   # prime it
+    propfont.PropFont(os.path.join(FONTDIR, fonts[0]), buf=buf)   # prime it
     try:
         propfont.PropFont(empty, buf=buf)
         raise AssertionError(
@@ -206,7 +206,7 @@ def test_file_backed_font_renders_identically():
     import adafruit_framebuf as afb
 
     W, H = 296, 128
-    fonts = sorted(f for f in os.listdir(CPDIR) if f.endswith(".pf"))
+    fonts = sorted(f for f in os.listdir(FONTDIR) if f.endswith(".pf"))
     assert fonts, "no .pf fonts installed"
 
     sample = [("Select Book:  (.epub converts)", 5, 5, 1),
@@ -226,7 +226,7 @@ def test_file_backed_font_renders_identically():
         return bytes(buf)
 
     for name in fonts:
-        path = os.path.join(CPDIR, name)
+        path = os.path.join(FONTDIR, name)
         mem = propfont.PropFont(path)
         disk = propfont.PropFont(path, file_backed=True)
         try:

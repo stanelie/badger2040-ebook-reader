@@ -13,14 +13,18 @@ Features :
 
 Installing (circuitpython version) :
 - copy the contents of `circuitpython_version/` to the root of the CIRCUITPY drive, keeping
-  `lib/` as `lib/`, and make a `/books` folder. Every dependency is in there - including
-  `lib/adafruit_framebuf.mpy` and the `font5x8.bin` it needs - so nothing has to be downloaded
-  separately.
-- keep `adafruit_framebuf` in `/lib`, not at the drive root. CircuitPython searches the root
-  first, so a `.py` copy there shadows the `.mpy` - and a `.py` is compiled into RAM at import
-  while an `.mpy` is not, which on a board that is already a few KB short decides whether it
-  boots. The unmodified upstream source is in `third_party/` for reference, deliberately not in
-  the install.
+  the folders as they are, and make a `/books` folder. Every dependency is in there, so
+  nothing has to be downloaded separately. Copy the hidden folders too - `cp -r` on macOS and
+  Linux will not pick up `.system` and `.fonts` from a `*` glob.
+- only `code.py` and `boot.py` sit at the root, because CircuitPython insists on finding them
+  there. Everything else is in `/.system`, and the fonts in `/.fonts`, so a mounted CIRCUITPY
+  shows your books rather than the machinery. macOS and Linux hide dot-folders; Windows uses a
+  FAT attribute instead and will show them.
+- `firmware/` holds the CircuitPython build and its patches. Those are for flashing the board,
+  not for copying onto it.
+- the unmodified upstream `adafruit_framebuf` source is in `third_party/` for reference,
+  deliberately not in the install - a `.py` copy of it at the drive root would be compiled into
+  RAM at every boot where the `.mpy` is not.
 - the board prints `boot: <n> bytes free` and names any missing data file at startup, which is
   the quickest way to spot a half-copied drive.
 

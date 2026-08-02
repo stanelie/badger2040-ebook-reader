@@ -13,6 +13,11 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPDIR = os.path.normpath(os.path.join(HERE, "..", "circuitpython_version"))
+# code.py and boot.py sit at the drive root; everything else is in dot-folders
+# so a mounted CIRCUITPY shows books rather than machinery.
+SYSDIR = os.path.join(CPDIR, ".system")
+FONTDIR = os.path.join(CPDIR, ".fonts")
+sys.path.insert(0, SYSDIR)
 sys.path.insert(0, CPDIR)
 sys.path.insert(0, HERE)
 
@@ -107,7 +112,7 @@ def _progress_ns():
     These live in convert_ui.py rather than code.py: they run only during a
     conversion, and code.py is compiled into RAM for the whole session.
     """
-    src = open(os.path.join(CPDIR, "convert_ui.py")).read()
+    src = open(os.path.join(SYSDIR, "convert_ui.py")).read()
     width = _const(open(os.path.join(CPDIR, "code.py")).read(), "WIDTH")
     env = {"WIDTH": width}
     bar = _const(src, "_CONV_BAR", env)
@@ -357,11 +362,12 @@ def test_code_py_stays_out_of_the_readers_way():
     # resident for the whole session, and comparing the two showed all 95
     # printable ASCII glyphs byte-identical to oldmono.pf - the same typeface
     # shipped twice, in two formats.
-    assert not os.path.exists(os.path.join(CPDIR, "vga2_8x16.py")), (
+    assert not os.path.exists(os.path.join(SYSDIR, "vga2_8x16.py")), (
         "vga2_8x16.py is back; oldmono.pf carries the same glyphs and the "
         "module costs ~4KB of RAM for as long as the reader runs")
-    for f in ("code.py", "convert.py", "convert_ui.py"):
-        text = open(os.path.join(CPDIR, f)).read()
+    for f, where in (("code.py", CPDIR), ("convert.py", SYSDIR),
+                     ("convert_ui.py", SYSDIR)):
+        text = open(os.path.join(where, f)).read()
         for line in text.splitlines():
             stripped = line.strip()
             if stripped.startswith(("import ", "from ")) and "vga2_8x16" in stripped:
@@ -406,7 +412,7 @@ def test_pending_conversion_round_trips_through_nvram():
 
     # the flag must be cleared BEFORE the work, or a conversion that resets the
     # board is retried forever with no way to reach the picker and cancel it
-    ui = open(os.path.join(CPDIR, "convert_ui.py")).read()
+    ui = open(os.path.join(SYSDIR, "convert_ui.py")).read()
     for node in ast.parse(ui).body:
         if isinstance(node, ast.FunctionDef) and node.name == "run_pending":
             body = ast.get_source_segment(ui, node)
@@ -452,7 +458,7 @@ def test_conversion_trigger_runs_after_everything_it_calls():
     """
     import re
     src = open(os.path.join(CPDIR, "code.py")).read()
-    ui = open(os.path.join(CPDIR, "convert_ui.py")).read()
+    ui = open(os.path.join(SYSDIR, "convert_ui.py")).read()
 
     lines = src.splitlines()
     # Every occurrence, not just the last: an extra call added earlier would
@@ -513,7 +519,7 @@ def test_failed_conversion_does_not_become_the_active_book():
     Making it active sent the reader to a blank page with nothing to turn to,
     which reads as a broken reader rather than a conversion that wrote nothing.
     """
-    ui = open(os.path.join(CPDIR, "convert_ui.py")).read()
+    ui = open(os.path.join(SYSDIR, "convert_ui.py")).read()
     for node in ast.parse(ui).body:
         if isinstance(node, ast.FunctionDef) and node.name == "run_pending":
             body = node
@@ -557,7 +563,7 @@ def test_convert_py_writes_nvram_the_reader_can_read():
     wrong one, or none.
     """
     import struct
-    src = open(os.path.join(CPDIR, "convert.py")).read()
+    src = open(os.path.join(SYSDIR, "convert.py")).read()
     code = open(os.path.join(CPDIR, "code.py")).read()
 
     nvm = bytearray(4096)
@@ -631,6 +637,62 @@ def test_convert_py_writes_nvram_the_reader_can_read():
             "book would not be found")
     print("  [ok] convert.py and code.py agree on the NVRAM layout")
 
+def test_only_code_and_boot_sit_at_the_drive_root():
+    """Everything else lives in dot-folders, hidden from a mounted CIRCUITPY.
+
+    CircuitPython insists on finding code.py and boot.py at the root, so those
+    two stay; the rest goes into /.system and the fonts into /.fonts. macOS and
+    Linux hide dot-folders; Windows uses a FAT attribute instead and shows them
+    regardless, so this is tidiness, not concealment.
+
+    The paths are absolute on the device, which means a file moved without its
+    references updated fails at boot rather than in a test - hence checking
+    both that the layout holds and that nothing points at the old places.
+    """
+    root = sorted(f for f in os.listdir(CPDIR)
+                  if not f.startswith(".") and f != "__pycache__")
+    assert set(root) <= {"code.py", "boot.py", "lib"}, (
+        f"unexpected files at the drive root: {root} - only code.py and "
+        "boot.py have to be there")
+
+    for name in ("propfont.py", "hyphenator.py", "uc8151_circuitpython.py",
+                 "epub_xtract.py", "convert.py", "convert_ui.py",
+                 "coverimg.py", "uzipfile.py", "inflate.py",
+                 "hyphen_patterns.txt"):
+        assert os.path.exists(os.path.join(SYSDIR, name)), (
+            f"{name} is not in .system")
+    for name in ("oldmono.pf", "literata.pf", "lexenddeca.pf", "font5x8.bin"):
+        assert os.path.exists(os.path.join(FONTDIR, name)), (
+            f"{name} is not in .fonts")
+
+    code = open(os.path.join(CPDIR, "code.py")).read()
+    # the hidden folders have to be on the import path before anything from
+    # them is imported, or the board does not boot at all
+    first_import = min(
+        (i for i, l in enumerate(code.splitlines())
+         if l.startswith("import ") and l.split()[1] in
+         ("propfont", "hyphenator", "adafruit_framebuf")),
+        default=None)
+    setup = next((i for i, l in enumerate(code.splitlines())
+                  if "/.system" in l and "sys.path" not in l), None)
+    setup = next(i for i, l in enumerate(code.splitlines()) if '"/.system"' in l)
+    assert first_import is None or setup < first_import, (
+        "code.py imports from /.system before putting it on sys.path")
+
+    # nothing may still reference a font or the patterns at the old top level
+    import re
+    for where, name in ([(CPDIR, "code.py")] +
+                        [(SYSDIR, f) for f in os.listdir(SYSDIR)
+                         if f.endswith(".py")]):
+        text = open(os.path.join(where, name)).read()
+        for stale in re.findall(r'"(?!/)[A-Za-z0-9_]+\.(?:pf|bin)"', text):
+            raise AssertionError(
+                f"{name} still opens {stale} at the top level; the fonts are "
+                "in /.fonts now")
+        assert '"hyphen_patterns.txt"' not in text, (
+            f"{name} still opens hyphen_patterns.txt at the top level")
+    print("  [ok] only code.py and boot.py at the root; paths follow")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -644,4 +706,5 @@ if __name__ == "__main__":
     test_failed_conversion_does_not_become_the_active_book()
     test_convert_py_writes_nvram_the_reader_can_read()
     test_code_py_stays_out_of_the_readers_way()
+    test_only_code_and_boot_sit_at_the_drive_root()
     print("\nALL CONVERT CHECKS PASSED")

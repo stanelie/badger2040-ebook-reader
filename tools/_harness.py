@@ -19,6 +19,12 @@ import textwrap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPDIR = os.path.normpath(os.path.join(HERE, "..", "circuitpython_version"))
+# The install has code.py and boot.py at the drive root and everything else in
+# dot-folders, so they stay out of the way when CIRCUITPY is mounted. On the
+# device those are absolute (/.system, /.fonts); here they hang off CPDIR.
+SYSDIR = os.path.join(CPDIR, ".system")
+FONTDIR = os.path.join(CPDIR, ".fonts")
+sys.path.insert(0, SYSDIR)
 sys.path.insert(0, CPDIR)
 # adafruit_framebuf is vendored here rather than in the install folder, so a
 # copy of it never lands at the drive root and shadows lib/'s .mpy.
@@ -28,7 +34,7 @@ sys.path.insert(0, THIRD_PARTY)
 import hyphenator  # noqa: E402  (needs CPDIR on the path first)
 import propfont  # noqa: E402
 
-hyphenator._PATTERNS_PATH = os.path.join(CPDIR, "hyphen_patterns.txt")
+hyphenator._PATTERNS_PATH = os.path.join(SYSDIR, "hyphen_patterns.txt")
 
 # Layout constants, mirroring code.py's CONFIG block.
 TEXT_PADDING = 2
@@ -64,8 +70,8 @@ def available_fonts():
     """Every .pf font shipped in circuitpython_version, in the order code.py
     offers them via the B button."""
     preferred = ["oldmono.pf", "literata.pf", "lexenddeca.pf"]
-    present = [f for f in preferred if os.path.exists(os.path.join(CPDIR, f))]
-    extra = sorted(f for f in os.listdir(CPDIR)
+    present = [f for f in preferred if os.path.exists(os.path.join(FONTDIR, f))]
+    extra = sorted(f for f in os.listdir(FONTDIR)
                    if f.endswith(".pf") and f not in preferred)
     return present + extra
 
@@ -77,7 +83,7 @@ def load_engine(font_file):
     ns["paginate_text"] is literally the shipping implementation.
     """
     hyphenator._load()
-    font = propfont.PropFont(os.path.join(CPDIR, font_file))
+    font = propfont.PropFont(os.path.join(FONTDIR, font_file))
 
     src = open(os.path.join(CPDIR, "code.py")).read()
     ns = {

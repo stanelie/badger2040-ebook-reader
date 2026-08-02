@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import CPDIR
+from _harness import CPDIR, FONTDIR, SYSDIR
 
 sys.path.insert(0, CPDIR)
 import epub_xtract
@@ -230,7 +230,7 @@ def test_streamer_does_not_reallocate_per_character():
     Roughly one allocation per 512-byte chunk now, instead of two per byte.
     """
     import ast
-    src = open(os.path.join(CPDIR, "epub_xtract.py")).read()
+    src = open(os.path.join(SYSDIR, "epub_xtract.py")).read()
     cls = None
     for node in ast.parse(src).body:
         if isinstance(node, ast.ClassDef) and node.name == "HtmlToTextStreamer":
@@ -267,7 +267,7 @@ def test_entry_point_runs_without_a_name_guard():
     therefore calls main() at module level.
     """
     import ast
-    path = os.path.join(CPDIR, "convert.py")
+    path = os.path.join(SYSDIR, "convert.py")
     assert os.path.exists(path), "convert.py entry point is missing"
     src = open(path).read()
     tree = ast.parse(src)
@@ -405,7 +405,7 @@ def test_inflater_imported_up_front():
         Cover extraction failed: memory allocation failed, allocating 13848 bytes
     """
     import ast
-    src = open(os.path.join(CPDIR, "uzipfile.py")).read()
+    src = open(os.path.join(SYSDIR, "uzipfile.py")).read()
     tree = ast.parse(src)
 
     top = set()
@@ -491,7 +491,7 @@ def test_eocd_scan_does_not_grab_64k():
     EPUBs have no comment, so a small scan finds it; it only grows if it must.
     """
     import ast
-    src = open(os.path.join(CPDIR, "uzipfile.py")).read()
+    src = open(os.path.join(SYSDIR, "uzipfile.py")).read()
     for node in ast.parse(src).body:
         if isinstance(node, ast.ClassDef) and node.name == "UZipFile":
             for m in node.body:

@@ -82,7 +82,8 @@ def report():
 
     def load_font():
         import propfont
-        for name in ("oldmono.pf", "literata.pf", "lexenddeca.pf"):
+        for name in ("/.fonts/oldmono.pf", "/.fonts/literata.pf",
+                     "/.fonts/lexenddeca.pf"):
             try:
                 holder["font"] = propfont.PropFont(name)
                 holder["font_name"] = name
