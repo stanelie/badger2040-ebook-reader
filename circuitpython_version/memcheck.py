@@ -20,6 +20,26 @@ def _free():
     return gc.mem_free()
 
 
+def _largest():
+    """Biggest single block available - the number that decides a failure.
+
+    Free memory says how much is left; this says whether any of it is in one
+    piece. A 4736-byte buffer refused with 70160 free is the difference between
+    the two, and only this number shows it.
+    """
+    gc.collect()
+    best, size = 0, 1024
+    while size <= 131072:
+        try:
+            b = bytearray(size)
+            del b
+            best = size
+            size *= 2
+        except MemoryError:
+            break
+    return best
+
+
 def report():
     steps = []
     base = _free()
@@ -37,7 +57,8 @@ def report():
         now = _free()
         cost = base - now
         steps.append((label, cost))
-        print("  %-28s %7d bytes   (%d free)" % (label, cost, now))
+        print("  %-28s %7d bytes   (%d free, largest >=%d)"
+              % (label, cost, now, _largest()))
         base = now
 
     # Imported in the order code.py pulls them in, so each cost is the marginal
