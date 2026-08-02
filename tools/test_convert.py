@@ -901,6 +901,45 @@ def test_no_module_level_name_is_used_before_it_exists():
     print(f"  [ok] module-level order is sound ({len(bound)} names bound)")
 
 
+def test_tethered_conversion_is_refused_before_restarting():
+    """Plugged in, do not restart - say so and keep the book queued.
+
+    Restarting achieves nothing while the host owns the filesystem: the
+    converter can only refuse. Worse, if the restart does not take - which is
+    what an IDE holding the serial port does - the screen is left reading
+    "Restarting..." with nothing happening at all.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "convert_epub":
+            body = ast.get_source_segment(src, node)
+    assert body, "convert_epub is gone"
+
+    usb = body.find("usb_connected")
+    restart = body.find("supervisor.reload()")
+    # the quoted string, not the bare word - it appears in a comment too,
+    # which made this pass with the message deleted
+    drawn = body.find('"Restarting..."')
+    assert usb != -1, (
+        "convert_epub does not check whether USB is attached, so it restarts "
+        "into a converter that can only refuse")
+    assert usb < restart, "the USB check comes after the restart"
+    assert drawn != -1, "the restart is no longer announced on the panel"
+    assert usb < drawn, (
+        'it draws "Restarting..." before checking USB, so a refusal leaves '
+        "that on the screen")
+
+    # the book must stay queued, so unplugging picks it up
+    queued = body.find("save_pending")
+    assert queued != -1 and queued < usb, (
+        "the book is not queued before the USB check, so unplugging would "
+        "have nothing to resume")
+    seg = body[usb:restart]
+    assert "clear_pending" not in seg, (
+        "the tethered path clears the queued book, so unplugging will not "
+        "convert it")
+    print("  [ok] tethered: queued and explained, no pointless restart")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -917,5 +956,6 @@ if __name__ == "__main__":
     test_only_code_and_boot_sit_at_the_drive_root()
     test_progress_forces_a_full_refresh_periodically()
     test_a_conversion_refused_for_usb_stays_queued()
+    test_tethered_conversion_is_refused_before_restarting()
     test_no_module_level_name_is_used_before_it_exists()
     print("\nALL CONVERT CHECKS PASSED")

@@ -1317,17 +1317,28 @@ def convert_epub(epub_path):
     into: the archive needs a 32KB streaming window in one piece, and freeing
     the reader's own buffers first returns the bytes without closing the gaps.
 
-    Only returns if the restart could not happen - an IDE holding the serial
-    port sends the board to the REPL instead - in which case it falls back to
-    converting in place, which is what it used to do always.
+    Returns without converting in two cases. Plugged in, the host owns the
+    filesystem and the converter could only refuse, so the book is left queued
+    and unplugging - which restarts the board - runs it. And if the restart
+    itself does not happen, which is what an IDE holding the serial port does,
+    it falls back to converting in place as it used to always.
     """
     try:
         save_pending(epub_path)
     except Exception as e:
         print(f"could not queue the conversion: {e}")
-    show_message(("Converting EPUB", 75, 40), ("Restarting...", 90, 70))
     try:
         import supervisor
+        if supervisor.runtime.usb_connected:
+            # No point restarting: the host owns the filesystem, so the
+            # converter would only refuse. It stays queued, and unplugging
+            # restarts the board straight into it.
+            show_message(("Queued for conversion", 55, 25),
+                         ("Unplug USB to start it", 50, 55),
+                         ("the computer holds the disk", 35, 85))
+            time.sleep(4)
+            return None
+        show_message(("Converting EPUB", 75, 40), ("Restarting...", 90, 70))
         # Run convert.py rather than this file. Restarting alone was not
         # enough: code.py and its modules stay resident while it is the running
         # program, and the converter reached the archive with 46KB free and no
