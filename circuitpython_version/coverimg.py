@@ -35,6 +35,11 @@ TARGET_DIR = "books"
 # look at it, which for a sleeping device is no hardship.
 ROTATE_COVER = True
 
+# Scale until the cover covers the whole panel and crop what hangs off, rather
+# than fitting it whole inside white margins. Fitted whole and turned it still
+# reached only 56% of the screen. Centred, so it is the outside edges that go.
+FILL_SCREEN = True
+
 # Ordered 4x4 dithering. On a panel with two levels, thresholding flat tone
 # makes a cover a silhouette; a dither matrix trades spatial detail for the
 # shading that is actually there. Cheap, and unlike error diffusion it needs no
@@ -65,17 +70,20 @@ def find_cover(txt_path):
 
 
 def pack(get_pixel, src_w, src_h, out=None, width=WIDTH, height=HEIGHT,
-         rotate=False):
+         rotate=False, fill=None):
     """Fit an RGB565 source into one 1-bit MHMSB frame, dithered.
 
     `get_pixel(x, y)` returns RGB565. Kept free of jpegio so the scaling,
     rotation, luminance and dithering can be exercised without a decoder or a
     device.
 
-    Fitted whole by whichever axis runs out first and centred; the margins stay
-    white. `rotate` turns the source a quarter-turn counter-clockwise first,
-    which is how a portrait cover gets to use the length of a landscape panel.
+    `fill` scales until the panel is covered and crops the overflow, centred;
+    without it the whole image fits inside white margins instead. `rotate`
+    turns the source a quarter-turn counter-clockwise first, which is how a
+    portrait cover gets to use the length of a landscape panel.
     """
+    if fill is None:
+        fill = FILL_SCREEN
     if rotate:
         # A quarter-turn counter-clockwise: the source's right-hand column
         # becomes the top row, so reading across the turned image reads down
@@ -93,30 +101,50 @@ def pack(get_pixel, src_w, src_h, out=None, width=WIDTH, height=HEIGHT,
     if src_w <= 0 or src_h <= 0:
         return out
 
-    # Largest whole-image fit, in 1/256ths to stay in integers.
-    scale = min((width << 8) // src_w, (height << 8) // src_h)
+    # In 1/256ths to stay in integers. Filling takes the larger ratio, so the
+    # short side reaches the edge and the long one runs past it; fitting takes
+    # the smaller, so the long side stops at the edge and margins remain.
+    if fill:
+        # Rounded UP, both here and after scaling. Rounding down leaves the
+        # panel a few columns short of covered - 98% of it, with a white strip
+        # down one edge, which is the one thing filling is supposed to avoid.
+        scale = max(((width << 8) + src_w - 1) // src_w,
+                    ((height << 8) + src_h - 1) // src_h)
+    else:
+        scale = min((width << 8) // src_w, (height << 8) // src_h)
     if scale < 1:
         scale = 1
     draw_w = (src_w * scale) >> 8
     draw_h = (src_h * scale) >> 8
+    if fill:
+        # A pixel or two, when the shift above truncates. Cheaper than carrying
+        # more precision, and the aspect error is well under a percent.
+        if draw_w < width:
+            draw_w = width
+        if draw_h < height:
+            draw_h = height
     if draw_w < 1:
         draw_w = 1
     if draw_h < 1:
         draw_h = 1
+    # Negative when filling: that is the crop, half of it off each side.
     x0 = (width - draw_w) // 2
     y0 = (height - draw_h) // 2
     row_bytes = width >> 3
 
-    for dy in range(draw_h):
-        sy = (dy * src_h) // draw_h
-        oy = y0 + dy
-        if oy < 0 or oy >= height:
+    # Walked over the OUTPUT, not over the scaled image. Filling makes the
+    # scaled image bigger than the panel, and iterating that would spend most
+    # of its time on pixels that are then thrown away.
+    for oy in range(height):
+        dy = oy - y0
+        if dy < 0 or dy >= draw_h:
             continue
+        sy = (dy * src_h) // draw_h
         rowbase = oy * row_bytes
         bayer_row = (oy & 3) << 2
-        for dx in range(draw_w):
-            ox = x0 + dx
-            if ox < 0 or ox >= width:
+        for ox in range(width):
+            dx = ox - x0
+            if dx < 0 or dx >= draw_w:
                 continue
             v = get_pixel((dx * src_w) // draw_w, sy)
             # RGB565 -> luma. Weights are the usual 77/151/28 over 256, with
@@ -220,7 +248,10 @@ def render(cover_path, out_path, width=WIDTH, height=HEIGHT, budget=40000,
         if sw * sh * 2 > budget:
             continue
         chosen = (s, sw, sh)
-        if sw >= need_w or sh >= need_h:
+        # Filling scales up until both axes are covered, so both need the
+        # resolution; fitting only stretches until the first one reaches.
+        if (sw >= need_w and sh >= need_h) if FILL_SCREEN else (
+                sw >= need_w or sh >= need_h):
             break
     if chosen is None:
         print("[COVER] %dx%d will not decode within %d bytes"
@@ -239,7 +270,7 @@ def render(cover_path, out_path, width=WIDTH, height=HEIGHT, budget=40000,
     if rotate is None:
         rotate = ROTATE_COVER
     frame = pack(lambda x, y: bitmap[x, y], sw, sh, width=width, height=height,
-                 rotate=rotate)
+                 rotate=rotate, fill=FILL_SCREEN)
     bitmap = None
 
     try:

@@ -293,8 +293,10 @@ def test_cover_fits_the_panel_and_dithers():
         return [(x, y) for y in range(H) for x in range(W)
                 if frame[y * ROW + (x >> 3)] & (0x80 >> (x & 7))]
 
+    # fill=False explicitly: filling is the default now, and it crops rather
+    # than preserving the whole image, so this is the other mode.
     for sw, sh in ((600, 800), (1200, 1600), (100, 138), (128, 296), (2000, 100)):
-        px = inked(coverimg.pack(lambda x, y: rgb565(0, 0, 0), sw, sh))
+        px = inked(coverimg.pack(lambda x, y: rgb565(0, 0, 0), sw, sh, fill=False))
         xs = [p[0] for p in px]
         ys = [p[1] for p in px]
         w, h = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
@@ -304,16 +306,17 @@ def test_cover_fits_the_panel_and_dithers():
         assert min(xs) >= 0 and min(ys) >= 0
 
     # tone
-    assert sum(coverimg.pack(lambda x, y: rgb565(255, 255, 255), W, H)) == 0, (
+    assert sum(coverimg.pack(lambda x, y: rgb565(255, 255, 255), W, H,
+                             fill=False)) == 0, (
         "a white cover put ink on the panel")
-    black = coverimg.pack(lambda x, y: rgb565(0, 0, 0), W, H)
+    black = coverimg.pack(lambda x, y: rgb565(0, 0, 0), W, H, fill=False)
     assert sum(bin(b).count("1") for b in black) == W * H, (
         "a black cover left gaps")
 
     # a grey ramp must ink monotonically, and land near the requested level -
     # that is the difference between a dither and a threshold
     for level, expect in ((64, 75), (128, 50), (192, 25)):
-        f = coverimg.pack(lambda x, y, l=level: rgb565(l, l, l), W, H)
+        f = coverimg.pack(lambda x, y, l=level: rgb565(l, l, l), W, H, fill=False)
         pct = 100 * sum(bin(b).count("1") for b in f) // (W * H)
         assert abs(pct - expect) <= 8, (
             f"grey {level} inked {pct}% of the panel, expected about "
@@ -351,15 +354,17 @@ def test_cover_is_turned_counter_clockwise_to_fill_the_panel():
         return rgb565(0, 0, 0)
 
     for sw, sh in ((800, 1104), (600, 800), (1200, 1600)):
-        _, _, uw, uh = bbox(coverimg.pack(black, sw, sh, rotate=False))
-        _, _, tw, th = bbox(coverimg.pack(black, sw, sh, rotate=True))
+        # fill=False: filling covers the whole panel either way, so the gain
+        # from turning it only shows when the image is fitted whole.
+        _, _, uw, uh = bbox(coverimg.pack(black, sw, sh, rotate=False, fill=False))
+        _, _, tw, th = bbox(coverimg.pack(black, sw, sh, rotate=True, fill=False))
         assert tw * th > uw * uh * 1.5, (
             f"{sw}x{sh}: turning it covers {tw}x{th} against {uw}x{uh} "
             "upright - barely more than leaving it alone")
         assert tw <= W and th <= H, f"{sw}x{sh}: turned image escapes the panel"
 
     SW, SH = 200, 400
-    ax, ay, aw, ah = bbox(coverimg.pack(black, SW, SH, rotate=True))
+    ax, ay, aw, ah = bbox(coverimg.pack(black, SW, SH, rotate=True, fill=False))
     edges = (
         ("left", lambda x, y: rgb565(0, 0, 0) if x < 20 else rgb565(255, 255, 255),
          "bottom"),
@@ -371,7 +376,7 @@ def test_cover_is_turned_counter_clockwise_to_fill_the_panel():
          "right"),
     )
     for name, paint, expect in edges:
-        x0, y0, w, h = bbox(coverimg.pack(paint, SW, SH, rotate=True))
+        x0, y0, w, h = bbox(coverimg.pack(paint, SW, SH, rotate=True, fill=False))
         cx, cy = x0 + w / 2, y0 + h / 2
         got = ("left" if cx < ax + aw / 3 else
                "right" if cx > ax + 2 * aw / 3 else
@@ -381,12 +386,76 @@ def test_cover_is_turned_counter_clockwise_to_fill_the_panel():
             f"the {name} edge of the cover ended up at the {got}; a "
             f"counter-clockwise quarter-turn puts it at the {expect}")
 
-    _, _, uw, uh = bbox(coverimg.pack(black, 800, 1104, rotate=False))
+    _, _, uw, uh = bbox(coverimg.pack(black, 800, 1104, rotate=False, fill=False))
     assert uh > uw, "upright fitting no longer keeps the cover portrait"
     assert coverimg.ROTATE_COVER is True, (
         "covers are no longer turned by default, so they go back to using a "
         "third of the screen")
     print("  [ok] covers turn counter-clockwise and cover ~1.9x the panel")
+
+def test_cover_fills_the_panel_and_crops_from_the_centre():
+    """Filling must reach every pixel, and lose the outside evenly.
+
+    Fitted whole, even turned, a cover reached about 56% of the screen and sat
+    in white margins. Filling scales until both axes are covered and crops the
+    overflow - roughly 58% of the cover survives, and all of the panel is used.
+
+    Coverage has to be exact. Rounding the scale down leaves the panel 98%
+    covered, with a white strip down one edge, which looks like a bug rather
+    than a crop.
+    """
+    sys.path.insert(0, CPDIR)
+    import coverimg
+
+    W, H, ROW = 296, 128, 296 >> 3
+
+    def rgb565(r, g, b):
+        return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+    def lit(frame):
+        return sum(bin(b).count("1") for b in frame)
+
+    def black(x, y):
+        return rgb565(0, 0, 0)
+
+    for sw, sh in ((800, 1104), (600, 800), (1200, 1600), (1000, 1000),
+                   (400, 1600), (2000, 100)):
+        filled = coverimg.pack(black, sw, sh, rotate=True, fill=True)
+        assert lit(filled) == W * H, (
+            f"{sw}x{sh}: filling left {W * H - lit(filled)} pixels of the "
+            "panel blank")
+        fitted = coverimg.pack(black, sw, sh, rotate=True, fill=False)
+        assert lit(fitted) < W * H, (
+            f"{sw}x{sh}: fit=False is filling too, so nothing is letterboxed "
+            "any more")
+
+    # the crop takes from the outside, not from one side
+    def middle_block(x, y):
+        return (rgb565(0, 0, 0)
+                if (800 // 3 < x < 2 * 800 // 3 and 1104 // 3 < y < 2 * 1104 // 3)
+                else rgb565(255, 255, 255))
+    frame = coverimg.pack(middle_block, 800, 1104, rotate=True, fill=True)
+    px = [(x, y) for y in range(H) for x in range(W)
+          if frame[y * ROW + (x >> 3)] & (0x80 >> (x & 7))]
+    xs = [p[0] for p in px]
+    ys = [p[1] for p in px]
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    assert abs(cx - W / 2) < 8 and abs(cy - H / 2) < 8, (
+        f"the middle of the cover landed at ({cx:.0f},{cy:.0f}) instead of the "
+        f"middle of the panel ({W // 2},{H // 2}) - the crop is lopsided")
+
+    # and dithering still works on top of the crop
+    for level, expect in ((64, 75), (128, 50), (192, 25)):
+        pct = 100 * lit(coverimg.pack(
+            lambda x, y, l=level: rgb565(l, l, l), 800, 1104,
+            rotate=True, fill=True)) // (W * H)
+        assert abs(pct - expect) <= 8, (
+            f"grey {level} inked {pct}% once filling, expected about {expect}%")
+
+    assert coverimg.FILL_SCREEN is True, (
+        "covers no longer fill the screen by default, so they go back to "
+        "sitting in white margins")
+    print("  [ok] covers fill the panel completely, cropped from the centre")
 
 def main():
     print("sleep / inactivity behaviour:")
@@ -400,6 +469,7 @@ def main():
     test_sleep_frame_is_exactly_one_screen()
     test_cover_fits_the_panel_and_dithers()
     test_cover_is_turned_counter_clockwise_to_fill_the_panel()
+    test_cover_fills_the_panel_and_crops_from_the_centre()
     print("\nALL POWER CHECKS PASSED")
     return 0
 

@@ -36,9 +36,10 @@ Usage :
 - button UP for previous page, button DOWN for next page
 - long press button A for full refresh (circuitpython version)
 - when it sleeps it shows the book's cover, if that book has one, and says "Sleeping..."
-  otherwise. The cover is turned a quarter-turn so it uses the length of the screen rather
-  than a third of the width - hold the reader sideways to look at it. Set
-  `ROTATE_COVER = False` in coverimg.py for upright. Covers are turned into a sleep frame at conversion time - for books converted
+  otherwise. The cover is turned a quarter-turn and scaled to fill the whole screen, so its
+  outer edges are cropped - hold the reader sideways to look at it. `ROTATE_COVER = False`
+  in coverimg.py leaves it upright, `FILL_SCREEN = False` fits it whole inside white margins
+  instead of cropping. Covers are turned into a sleep frame at conversion time - for books converted
   before that existed, hold A while resetting and run `import coverimg; coverimg.main()`
 
   Note : because there is very little space on the rp2040, not many .epub files can be stored on it, maybe just one, and the conversion will eat up more space for the extracted text
