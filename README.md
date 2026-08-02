@@ -28,6 +28,32 @@ Installing (circuitpython version) :
 - the board prints `boot: <n> bytes free` and names any missing data file at startup, which is
   the quickest way to spot a half-copied drive.
 
+Faster boots (optional) :
+- CircuitPython compiles every `.py` it imports, on every boot - about 138KB of source here,
+  before `code.py`'s own timing marks can even start. `tools/precompile.sh` builds a `build/`
+  tree with those modules turned into `.mpy`, which are compiled already and only have to be
+  loaded, and copies everything else through unchanged:
+
+  ```
+  tools/precompile.sh
+  cp -R build/. /Volumes/CIRCUITPY/
+  ```
+
+- it needs `tools/mpy-cross`, which is not in the repo. Download the build matching your
+  firmware from [Adafruit's
+  bucket](https://adafruit-circuit-python.s3.amazonaws.com/index.html?prefix=bin/mpy-cross/)
+  - `macos/mpy-cross-macos-<version>-x64` for an Intel Mac, `-arm64` for Apple silicon - then
+  `chmod +x tools/mpy-cross`.
+- match the **mpy format**, not the version string. `tools/mpy-cross --version` prints the
+  format it emits; the first four bytes of any `.mpy` the board already loads say what it
+  wants. `43 06 00 1f` is mpy v6.3, which is what CircuitPython 10.1 uses - so a 10.1.0-alpha
+  mpy-cross is fine for a 10.1.0-beta board.
+- `code.py` and `convert.py` stay as source: CircuitPython runs those as code files and will
+  not accept `.mpy` for them. To precompile the bulk of `code.py`, it would have to become a
+  shim importing a module that can be.
+- the source tree is never touched, so editing and testing carry on as normal. What you lose
+  is reading the code on the board itself.
+
 Usage :
 - put .txt or .epub ebook file into /books folder of the badger2040
 - selecting an .epub in the picker converts it and opens the result. The board restarts into
