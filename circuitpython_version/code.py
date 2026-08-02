@@ -598,6 +598,10 @@ _scratch_fb = adafruit_framebuf.FrameBuffer(
 # however much is free in total. Seeing "70160 free" next to a failed 4736-byte
 # allocation is what tells you the problem is fragmentation, not shortage.
 gc.collect()
+# Seeded, not left to the loop: on a board so short that even 1024 fails, the
+# loop breaks before assigning and the print below raises NameError - losing
+# the boot line in the one case it most needs to be read.
+_largest = 0
 _probe = 1024
 while _probe <= 65536:
     try:
@@ -1810,6 +1814,17 @@ if PENDING_CONVERT:
             pass
 
 first_display_update = True
+
+# Whether USB was attached at startup. Losing it later means the host has let
+# go of the filesystem, which is the moment a queued conversion can run - so
+# the reader restarts and comes back up to find it. `supervisor` is bound here
+# rather than inside the loop; if the import fails this stays False and the
+# check below short-circuits before ever reaching it.
+try:
+    import supervisor
+    _usb_was_connected = supervisor.runtime.usb_connected
+except Exception:
+    _usb_was_connected = False
 
 # Load last active book from NVRAM
 text_file = state_load_last_book()

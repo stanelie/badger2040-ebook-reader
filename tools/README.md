@@ -137,6 +137,11 @@ the progress screen draws through while still releasing the rest, and that
 `oldmono.pf`, so the same typeface was shipping twice and costing ~4KB of RAM
 for the copy nobody needed.
 
+It also walks `code.py`'s module level in order and fails on any name read
+before it is bound. That is a NameError at boot, on the board, with nothing on
+screen - and it shipped once, because the test guarding it searched for the
+name and found the line that *used* it.
+
 And it holds `code.py` to a size budget. code.py is compiled into RAM when the
 board boots and stays resident for the whole session, so every byte in it is
 memory the reader never gets back - adding the conversion UI there once grew it

@@ -825,6 +825,82 @@ def test_a_conversion_refused_for_usb_stays_queued():
     assert "supervisor.reload()" in code
     print("  [ok] a USB-refused conversion stays queued; unplugging restarts")
 
+def test_no_module_level_name_is_used_before_it_exists():
+    """code.py runs top to bottom, so order is correctness, not style.
+
+    A name used at module level before it is bound raises at boot, on the
+    board, with nothing on screen:
+
+        NameError: name '_usb_was_connected' isn't defined
+
+    Function and class bodies are exempt - they run later, when everything
+    exists. A compound statement is treated as a unit: anything it binds
+    anywhere counts as bound for the whole of it, which is loose but avoids
+    guessing at branch order.
+
+    This exists because a test that merely searched for the name passed: the
+    line that *used* it contained it, so the missing definition looked present.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    tree = ast.parse(src)
+
+    bound = set(dir(__builtins__)) | {
+        "__name__", "__file__", "__doc__", "__builtins__"}
+
+    def bindings(node):
+        """Every name this statement binds, not descending into def/class."""
+        out = set()
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef)):
+                out.add(cur.name)
+                continue                     # its body runs later
+            if isinstance(cur, ast.Name) and isinstance(cur.ctx, ast.Store):
+                out.add(cur.id)
+            elif isinstance(cur, (ast.Import, ast.ImportFrom)):
+                for a in cur.names:
+                    out.add((a.asname or a.name).split(".")[0])
+            elif isinstance(cur, ast.ExceptHandler) and cur.name:
+                out.add(cur.name)
+            elif isinstance(cur, ast.comprehension):
+                for sub in ast.walk(cur.target):
+                    if isinstance(sub, ast.Name):
+                        out.add(sub.id)
+            for child in ast.iter_child_nodes(cur):
+                stack.append(child)
+        return out
+
+    def reads(node):
+        """Names this statement loads, not descending into def/class bodies."""
+        out = set()
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(cur, ast.Name) and isinstance(cur.ctx, ast.Load):
+                out.add(cur.id)
+            for child in ast.iter_child_nodes(cur):
+                stack.append(child)
+        return out
+
+    problems = []
+    for node in tree.body:
+        here = bindings(node)
+        for name in sorted(reads(node) - bound - here):
+            if not name.startswith("__"):
+                problems.append((node.lineno, name))
+        bound |= here
+
+    assert not problems, (
+        "used at module level before being defined, which is a NameError at "
+        "boot: " + ", ".join(f"{n!r} near line {ln}" for ln, n in problems[:6]))
+    print(f"  [ok] module-level order is sound ({len(bound)} names bound)")
+
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -841,4 +917,5 @@ if __name__ == "__main__":
     test_only_code_and_boot_sit_at_the_drive_root()
     test_progress_forces_a_full_refresh_periodically()
     test_a_conversion_refused_for_usb_stays_queued()
+    test_no_module_level_name_is_used_before_it_exists()
     print("\nALL CONVERT CHECKS PASSED")
