@@ -319,9 +319,21 @@ def test_code_py_stays_out_of_the_readers_way():
     # point of it - and it buys back far more than it costs: a conversion boot
     # now skips the 31.5KB pattern blob, the font and three screen buffers.
     #
+    # 67000 -> 67500: recovery when a conversion boot raises. Without it the
+    # board stops dead with a blinking LED and no screen, having skipped the
+    # page buffers it would need to carry on; 189 bytes to restart into a
+    # working reader instead is worth paying.
+    #
     # A ratchet against drift, not a hardware limit. Move it deliberately, and
-    # write down why - two raises in a row is worth noticing.
-    budget = 67000
+    # write down why - this is the third raise, which is a trend.
+    #
+    # The identified next move is the picker: file_picker, _draw_book_list and
+    # open_picker are ~8.4KB compiled, and run only while the A button is held.
+    # Lazily importing them the way convert_ui is imported would take code.py
+    # well below any of these numbers. It was not done here because the gain
+    # needed was 189 bytes and the picker is the part of this codebase with the
+    # most recent history of subtle breakage.
+    budget = 67500
     assert size <= budget, (
         f"code.py compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "
@@ -405,6 +417,75 @@ def test_conversion_boot_skips_the_readers_allocations():
             "conversion fail")
     print("  [ok] a conversion boot skips the blob, the font and the page buffers")
 
+def test_conversion_trigger_runs_after_everything_it_calls():
+    """convert_ui reaches back into code.py, so the trigger must come last.
+
+    Placed beside the display setup, where it went first, the progress screen
+    called reader._ScratchFrame, reader.update_display_fast and
+    reader.show_message before those existed. A conversion boot raised
+    AttributeError before drawing anything: a blank screen and a blinking LED,
+    with no serial attached to say why.
+
+    Nothing is lost by waiting - what matters for memory is that the buffers,
+    font and pattern blob are skipped far earlier.
+    """
+    import re
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    ui = open(os.path.join(CPDIR, "convert_ui.py")).read()
+
+    lines = src.splitlines()
+    # Every occurrence, not just the last: an extra call added earlier would
+    # otherwise hide behind the correct one and crash exactly as before.
+    triggers = [i for i, line in enumerate(lines, 1)
+                if "convert_ui.run_pending" in line
+                and not line.strip().startswith("#")]
+    assert triggers, "code.py never runs a queued conversion"
+    assert len(triggers) == 1, (
+        f"a queued conversion is started from {len(triggers)} places "
+        f"(lines {triggers}); only the last one is safely placed")
+    trigger = triggers[0]
+
+    defined = {}
+    for node in ast.parse(src).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            defined[node.name] = node.lineno
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    defined.setdefault(t.id, node.lineno)
+
+    late = [n for n in sorted(set(re.findall(r"reader\.(\w+)", ui)))
+            if n in defined and defined[n] > trigger]
+    assert not late, (
+        f"convert_ui uses {late} from code.py, but they are defined after the "
+        f"trigger on line {trigger} - a conversion boot will raise before it "
+        "draws anything")
+
+    # and a failure must restart rather than stop the board dead
+    # The handler has to be the one wrapping run_pending, and it has to be a
+    # catch-all. Matched through the AST rather than by reading nearby text:
+    # the recovery block has a second, narrower `except Exception` guarding the
+    # supervisor import, and a text search happily accepts that one instead.
+    guard = None
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Try):
+            body = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+            if "run_pending" in body:
+                guard = node
+    assert guard is not None, (
+        "the queued conversion is not wrapped in a try; an unhandled error "
+        "leaves a board with no page buffers and a blinking LED")
+
+    catch_all = any(h.type is None or getattr(h.type, "id", None) == "Exception"
+                    for h in guard.handlers)
+    assert catch_all, (
+        "the conversion trigger catches only specific errors; anything else "
+        "stops the board dead with a blinking LED and no screen")
+    assert "reload" in ast.dump(ast.Module(body=guard.handlers, type_ignores=[])), (
+        "the recovery path does not restart the board, so it would carry on "
+        "as a reader with no page buffers")
+    print(f"  [ok] conversion trigger (line {trigger}) runs after all it calls")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -414,5 +495,6 @@ if __name__ == "__main__":
     test_reader_memory_is_freed_but_the_panel_survives()
     test_pending_conversion_round_trips_through_nvram()
     test_conversion_boot_skips_the_readers_allocations()
+    test_conversion_trigger_runs_after_everything_it_calls()
     test_code_py_stays_out_of_the_readers_way()
     print("\nALL CONVERT CHECKS PASSED")

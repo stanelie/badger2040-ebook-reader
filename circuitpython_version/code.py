@@ -561,11 +561,6 @@ _scratch_fb = adafruit_framebuf.FrameBuffer(
     raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
 )
 
-# The panel exists and nothing else has been built, which is the whole reason
-# the picker queued this instead of converting in place. Restarts when done.
-if PENDING_CONVERT:
-    import convert_ui
-    convert_ui.run_pending(PENDING_CONVERT)
 
 # What is left once every buffer is placed - free memory AND the largest single
 # block, because those answer different questions and only the second one
@@ -1762,6 +1757,33 @@ def check_inactivity():
 # ---------------- MAIN -----------------
 
 # Flag to force full refresh on first display update after wake-up
+# A conversion queued by the picker runs here and restarts the board, so the
+# reader never starts. This sits after the definitions rather than beside the
+# display setup, where it was first put: the progress screen calls back into
+# _ScratchFrame, update_display_fast and show_message, and at that point they
+# did not exist yet, so a conversion boot raised AttributeError before drawing
+# anything - a dead screen and a blinking LED.
+#
+# Nothing is lost by waiting. What matters for memory is that the buffers, the
+# font and the pattern blob were skipped much earlier; everything in between is
+# only definitions.
+if PENDING_CONVERT:
+    try:
+        import convert_ui
+        convert_ui.run_pending(PENDING_CONVERT)  # restarts; does not return
+    except Exception as _e:
+        # Anything unhandled here would otherwise stop the board dead with a
+        # blinking LED and no screen, which is what a conversion boot looked
+        # like when it raised. The queued job has already been cleared, so
+        # restarting comes straight back up as an ordinary reader. Carrying on
+        # is not an option: this boot skipped the page buffers and the font.
+        print(f"conversion boot failed, restarting as reader: {_e}")
+        try:
+            import supervisor
+            supervisor.reload()
+        except Exception:
+            pass
+
 first_display_update = True
 
 # Load last active book from NVRAM
