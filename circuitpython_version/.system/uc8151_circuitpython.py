@@ -149,7 +149,7 @@ class UC8151:
                  mirror_x=False, mirror_y=False, inverted=False, no_flickering=False, 
                  debug=False, full_update_period=50, dangerous_reaffirm_black=False,
                  use_framebuf_font=False, font_path="/.fonts/font5x8.bin", rotation=0,
-                 ui_font=None):
+                 ui_font=None, buf=None):
         """
         Initialize the UC8151 e-ink display driver.
         
@@ -158,6 +158,10 @@ class UC8151:
                      For Badger 2040, use rotation=270 to correct orientation.
             use_framebuf_font: If True, use adafruit_framebuf's font (requires font5x8.bin).
             font_path: Path to font5x8.bin file (only used if use_framebuf_font=True).
+            buf: a framebuffer to draw into, instead of allocating one. The
+                 caller almost certainly has a screen-sized buffer already, and
+                 a second one is 4736 bytes of duplicate - claimed here, after
+                 everything optional, which is the worst place to need it.
             ui_font: a propfont.PropFont for interface text. Preferred over
                      use_framebuf_font. The reader passes oldmono.pf opened
                      file-backed, which is the same typeface the old vga2_8x16
@@ -237,9 +241,24 @@ class UC8151:
         
         self.initialize_display()
         
-        # Create framebuffer using adafruit_framebuf
-        # The framebuffer is always in the rotated orientation
-        self.raw_fb = bytearray(self.width * self.height // 8)
+        # The framebuffer is always in the rotated orientation.
+        #
+        # Taking the caller's buffer when offered matters more than it looks:
+        # this runs after every optional allocation the program has made, so a
+        # board a few KB short fails here, on a buffer it already owns a copy
+        # of - the reader's raw_working_buffer is the same size and the same
+        # thing:
+        #
+        #     File "uc8151_circuitpython.py", line 242, in __init__
+        #     MemoryError: memory allocation failed, allocating 4736 bytes
+        need = self.width * self.height // 8
+        if buf is not None and len(buf) == need:
+            self.raw_fb = buf
+        else:
+            if buf is not None:
+                print("display buffer is %d bytes, need %d - allocating"
+                      % (len(buf), need))
+            self.raw_fb = bytearray(need)
         self.fb = adafruit_framebuf.FrameBuffer(
             self.raw_fb, self.width, self.height, adafruit_framebuf.MHMSB
         )

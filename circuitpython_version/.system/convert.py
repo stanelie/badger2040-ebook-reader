@@ -126,6 +126,7 @@ rotate_scratch = bytearray(BUF_SIZE)
 
 display = UC8151(
     board.SPI(),
+    buf=working,                     # rather than a second screen-sized buffer
     cs=board.INKY_CS,
     dc=board.INKY_DC,
     rst=board.INKY_RST,
@@ -139,7 +140,7 @@ display = UC8151(
 )
 display.enable_quick_updates(True)
 display._rotate_scratch = rotate_scratch
-fb = adafruit_framebuf.FrameBuffer(working, WIDTH, HEIGHT, adafruit_framebuf.MHMSB)
+fb = display.fb                      # built over `working` above
 
 BAR = (14, 56, WIDTH - 28, 20)
 BAND_Y, BAND_H, STEP = 48, 64, 8

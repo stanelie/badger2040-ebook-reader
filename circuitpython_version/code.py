@@ -548,6 +548,9 @@ display = UC8151(
     # is ~200 glyphs behind a refresh that costs a second anyway, whereas the
     # page renderer's speed comes from having the whole font in memory to shift
     # bytes out of.
+    # The screen buffer claimed at the top of this file, rather than letting
+    # the driver allocate a second one of the same size after everything else.
+    buf=raw_working_buffer,
     ui_font=_ui_font,
     use_framebuf_font=True,
     font_path=FRAMEBUF_FONT,
@@ -586,9 +589,9 @@ prev_page_remainder = b""
 # screen render (reading pages, the book picker, reset/sleep messages) instead
 # of constructing a fresh wrapper each time. Only one is ever needed live at
 # once (the reader draws one screen, transmits it, then draws the next).
-_scratch_fb = adafruit_framebuf.FrameBuffer(
-    raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
-)
+# The driver built this over raw_working_buffer, so there is nothing to make:
+# _ScratchFrame's swap becomes a no-op, which is what it always effectively was.
+_scratch_fb = display.fb
 
 
 # What is left once every buffer is placed - free memory AND the largest single

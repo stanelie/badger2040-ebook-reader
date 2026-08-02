@@ -322,6 +322,7 @@ def main():
     test_full_update_after_partial_repaints_everything()
     test_refuses_what_it_cannot_map()
     test_rotation_scratch_is_claimed_before_optional_buffers()
+    test_one_screen_buffer_is_shared_not_duplicated()
     print("\nALL DISPLAY CHECKS PASSED")
     print("\nNote: the SPI conversation itself is not verifiable off-device.")
     return 0
@@ -384,6 +385,55 @@ def test_rotation_scratch_is_claimed_before_optional_buffers():
     assert guarded, "the boot-time quick-back allocation is no longer guarded "\
                     "by MemoryError"
     print("  [ok] rotation scratch claimed before optional buffers")
+
+def test_one_screen_buffer_is_shared_not_duplicated():
+    """The driver draws into the buffer the caller already owns.
+
+    It used to allocate its own, identical in size and purpose to the reader's
+    raw_working_buffer - and it did so inside __init__, after every optional
+    allocation the program had made. A board a few KB short therefore died on a
+    buffer it already had a copy of:
+
+        File "uc8151_circuitpython.py", line 242, in __init__
+        MemoryError: memory allocation failed, allocating 4736 bytes
+    """
+    drv = open(os.path.join(SYSDIR, "uc8151_circuitpython.py")).read()
+    assert "buf=None" in drv, "the driver no longer accepts a framebuffer"
+    # it must use what it is given, not allocate regardless
+    init = None
+    for node in ast.parse(drv).body:
+        if isinstance(node, ast.ClassDef) and node.name == "UC8151":
+            for m in node.body:
+                if isinstance(m, ast.FunctionDef) and m.name == "__init__":
+                    init = ast.get_source_segment(drv, m)
+    assert "self.raw_fb = buf" in init, (
+        "the driver ignores the buffer it is handed and allocates its own")
+
+    # every program that builds a display must hand one over
+    for where, name in ((CPDIR, "code.py"), (SYSDIR, "convert.py")):
+        src = open(os.path.join(where, name)).read()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "UC8151":
+                kw = {k.arg for k in node.keywords}
+                assert "buf" in kw, (
+                    f"{name} builds the display without buf=, so a second "
+                    "screen-sized buffer is allocated after everything else")
+
+    # code.py must not then build a third FrameBuffer over the same bytes
+    code = open(os.path.join(CPDIR, "code.py")).read()
+    assert "_scratch_fb = display.fb" in code, (
+        "code.py builds its own FrameBuffer over raw_working_buffer; the "
+        "driver already made one")
+
+    # the aliasing this rests on: a FrameBuffer writes through to its buffer
+    import adafruit_framebuf as afb
+    shared = bytearray(296 * 128 // 8)
+    fb = afb.FrameBuffer(shared, 296, 128, afb.MHMSB)
+    fb.fill_rect(0, 0, 8, 1, 1)
+    assert shared[0] == 0xFF, (
+        "a FrameBuffer does not write through to the buffer it was given, so "
+        "sharing one between the driver and the reader would not work")
+    print("  [ok] one screen buffer, shared by the driver and the reader")
 
 if __name__ == "__main__":
     sys.exit(main())
