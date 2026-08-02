@@ -123,6 +123,7 @@ def back_to_reader():
 working = bytearray(BUF_SIZE)
 rotate_scratch = bytearray(BUF_SIZE)
 
+
 display = UC8151(
     board.SPI(),
     cs=board.INKY_CS,
@@ -142,7 +143,15 @@ fb = adafruit_framebuf.FrameBuffer(working, WIDTH, HEIGHT, adafruit_framebuf.MHM
 
 BAR = (14, 56, WIDTH - 28, 20)
 BAND_Y, BAND_H, STEP = 48, 64, 8
-_state = {"px": -1, "drawn": False, "name": "", "done": 0, "total": 0}
+# Partial refreshes only drive the pixels inside their window, and the charge
+# in the rest of the panel drifts a little with each one. Over the thirty-odd
+# updates of a conversion the title and the counter outside the band fade
+# visibly - "starts fine, gets fainter". A full refresh puts them back, so one
+# is forced every few partials: at ~1s each that is a few seconds across a
+# conversion that takes minutes.
+FULL_EVERY = 6
+_state = {"px": -1, "drawn": False, "name": "", "done": 0, "total": 0,
+          "why": "", "partials": 0}
 
 NOTES = {"open": "Reading archive...", "cover": "Saving cover...",
          "readonly": "Filesystem is read-only!", "failed": "Conversion failed",
@@ -174,13 +183,15 @@ def draw(note=""):
         display.fb, display.raw_fb = old_fb, old_raw
 
     rotated = display._rotate_framebuffer(working)
-    if _state["drawn"] and not note:
+    if _state["drawn"] and not note and _state["partials"] < FULL_EVERY:
         try:
             if display.update_partial(0, BAND_Y, WIDTH, BAND_H,
                                       fb=rotated, pre_rotated=True):
+                _state["partials"] += 1
                 return
         except Exception as e:
             print(f"partial update failed, using full: {e}")
+    _state["partials"] = 0
     old_rot = display.rotation
     display.rotation = 0
     display.update(fb=rotated)
@@ -189,6 +200,8 @@ def draw(note=""):
 
 
 def progress(stage, done, total, name):
+    if stage in ("readonly", "failed", "empty"):
+        _state["why"] = stage
     if name:
         _state["name"] = name
     if total:
@@ -241,6 +254,23 @@ else:
             print(f"could not record the new book: {e}")
         draw("Done - opening book")
         time.sleep(1)
+    elif _state["why"] == "readonly":
+        # The log lives on the filesystem that could not be written, so there
+        # is nothing to go and read. Say what to do instead - and put the book
+        # back in the queue, because unplugging restarts the board and this
+        # will then simply work. Re-arming is safe here in a way it would not
+        # be for a crash: this failure is detected and reported, not a loop.
+        try:
+            import struct as _s
+            b = book.encode()[:PENDING_MAX]
+            microcontroller.nvm[NVM_O_PENDING:NVM_O_PENDING + 2] = bytes(
+                [PENDING_MAGIC, len(b)])
+            microcontroller.nvm[NVM_O_PENDING + 2:NVM_O_PENDING + 2 + len(b)] = b
+        except Exception as e:
+            print(f"could not re-queue the book: {e}")
+        _state["name"] = "USB holds the disk"
+        draw("Unplug to convert - it will resume")
+        time.sleep(8)
     else:
         draw("FAILED - see .convert.log")
         time.sleep(6)

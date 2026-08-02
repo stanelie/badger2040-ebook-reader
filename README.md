@@ -67,6 +67,9 @@ Converting an .epub (circuitpython version) :
   files, it keeps its position in NVRAM. On battery the converter takes it over by itself;
   while plugged in, hold button A while resetting so boot.py hands it over first.
 
+  Choosing an .epub while plugged in therefore cannot convert it. It says so, leaves the book
+  queued, and unplugging restarts the board and runs it.
+
 I like it!
 
 Case is here : https://cad.onshape.com/documents/814dd2a988145f0ed18b6efd/w/66507594fb6b5b6a70cee4f8/e/53ba6e3dcf1a4ae5db1cb3dd?renderMode=0&uiState=693158b53d70a686c43cbc0a

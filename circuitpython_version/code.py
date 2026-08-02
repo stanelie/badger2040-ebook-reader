@@ -1645,33 +1645,6 @@ def cycle_font():
                 print(f"could not redraw after a failed font switch: {e3}")
 
 
-def factory_reset():
-    """Wipe saved state and restart. Does not return."""
-    show_message(("RESETTING...", 80, 55))
-
-    try:
-        NVM[0:256] = bytes(256)
-        print("NVRAM cleared")
-    except Exception as e:
-        print(f"NVRAM clear error: {e}")
-
-    # Delete any legacy .idx files if they exist
-    try:
-        for f in os.listdir("/state"):
-            if f.endswith(".idx"):
-                try:
-                    os.remove("/state/" + f)
-                    print(f"Deleted: /state/{f}")
-                except:
-                    pass
-    except:
-        pass
-
-    show_message(("RESET COMPLETE", 65, 45), ("Restarting...", 80, 70))
-    time.sleep(1.5)
-    microcontroller.reset()
-
-
 def open_picker():
     """Show the book picker and switch books, or restore the current one."""
     global text_file, current_offset, current_remainder
@@ -1748,7 +1721,10 @@ def handle_menu_button():
 
     if press_duration >= 10.0:
         led_on()
-        factory_reset()  # does not return
+        # In .system: this runs once in a device's lifetime, and code.py is
+        # resident for the whole session.
+        import factory
+        factory.reset()  # does not return
     elif press_duration > 0.7:
         # Full refresh (clears e-ink ghosting)
         if reset_warning_shown:
@@ -1986,6 +1962,15 @@ while True:
     if button_pressed(buttons["a"]):
         led_on()
         handle_menu_button()
+
+    # USB UNPLUGGED
+    # Restarting on unplug settles the filesystem question in the one direction
+    # that matters: plugged in the host owns the disk and the converter refuses
+    # to write behind it, unplugged the board can take it. Coming back up also
+    # picks up any conversion left queued for exactly that reason.
+    if _usb_was_connected and not supervisor.runtime.usb_connected:
+        force_save_state()
+        supervisor.reload()
 
     # INACTIVITY TIMEOUT
     check_inactivity()

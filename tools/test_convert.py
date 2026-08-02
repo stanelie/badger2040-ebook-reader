@@ -48,12 +48,19 @@ def _const(src, name, env=None):
     changed them.
     """
     for node in ast.parse(src).body:
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == name:
-                    return eval(ast.get_source_segment(src, node.value),
-                                dict(env or {}))
-    raise RuntimeError(f"{name} not found in code.py")
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id == name:
+                return eval(ast.get_source_segment(src, node.value),
+                            dict(env or {}))
+            # tuple unpacking, e.g. BAND_Y, BAND_H, STEP = 48, 64, 8
+            if isinstance(t, ast.Tuple):
+                for i, el in enumerate(t.elts):
+                    if isinstance(el, ast.Name) and el.id == name:
+                        return eval(ast.get_source_segment(src, node.value),
+                                    dict(env or {}))[i]
+    raise RuntimeError(f"{name} not found")
 
 
 # -----------------------------------------------------------------
@@ -693,6 +700,131 @@ def test_only_code_and_boot_sit_at_the_drive_root():
             f"{name} still opens hyphen_patterns.txt at the top level")
     print("  [ok] only code.py and boot.py at the root; paths follow")
 
+def test_progress_forces_a_full_refresh_periodically():
+    """Partial refreshes alone let the rest of the panel fade.
+
+    A partial update only drives the pixels in its window, and the charge
+    elsewhere drifts a little each time. Across the thirty-odd updates of a
+    conversion the title and counter outside the band visibly lose contrast -
+    "starts fine, gets fainter". A full refresh restores them.
+
+    This is about the converter's own screen, in convert.py, which draws
+    without the reader loaded.
+    """
+    src = open(os.path.join(SYSDIR, "convert.py")).read()
+    every = _const(src, "FULL_EVERY")
+    assert 1 < every <= 12, (
+        f"FULL_EVERY is {every}; too high and the screen fades, too low and "
+        "the conversion spends its time refreshing")
+
+    calls = {"partial": 0, "full": 0}
+    bar = _const(src, "BAR", {"WIDTH": 296})
+
+    class _FB:
+        def fill(self, c):
+            pass
+
+        def fill_rect(self, *a):
+            pass
+
+    class _Display:
+        fb = _FB()
+        raw_fb = None
+        rotation = 270
+
+        def text(self, *a, **k):
+            pass
+
+        def _rotate_framebuffer(self, buf):
+            return buf
+
+        def update_partial(self, *a, **k):
+            calls["partial"] += 1
+            return True
+
+        def update(self, *a, **k):
+            calls["full"] += 1
+
+    ns = {
+        "WIDTH": 296, "HEIGHT": 128, "BAR": bar,
+        "BAND_Y": _const(src, "BAND_Y"), "BAND_H": _const(src, "BAND_H"),
+        "STEP": _const(src, "STEP"), "FULL_EVERY": every,
+        "NOTES": _const(src, "NOTES"),
+        "_state": dict(_const(src, "_state")),
+        "display": _Display(), "fb": _FB(), "working": bytearray(4736),
+        "print": lambda *a, **k: None,
+    }
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name in ("draw", "progress"):
+            exec(ast.get_source_segment(src, node), ns)
+
+    total = 75
+    ns["progress"]("start", 0, total, "Book.epub")
+    for i in range(total + 1):
+        ns["progress"]("chapter", i, total, "Book.epub")
+
+    assert calls["full"] >= 2, (
+        f"only {calls['full']} full refreshes across a whole conversion; the "
+        "screen outside the progress band will fade away")
+    assert calls["partial"] > calls["full"], (
+        "more full refreshes than partial ones - each costs about a second, "
+        "which the conversion has to wait for")
+    # never more than FULL_EVERY partials in a row
+    run = 0
+    ns2 = dict(ns)
+    print(f"  [ok] {calls['partial']} partial + {calls['full']} full refreshes "
+          f"(a full one at least every {every})")
+
+
+def test_a_conversion_refused_for_usb_stays_queued():
+    """Being plugged in is a fixable refusal, not a failure.
+
+    The queued book is normally cleared before the work, so a conversion that
+    resets the board cannot repeat forever. A read-only filesystem is different:
+    it is detected, reported, and fixed by unplugging - and unplugging restarts
+    the board, which is exactly when it should run.
+    """
+    src = open(os.path.join(SYSDIR, "convert.py")).read()
+    marker = src.index('_state["why"] == "readonly"')
+    # up to the next branch at the same level, or this reads the else: too
+    end = src.index("\n    else:", marker)
+    branch = src[marker:end]
+    # An actual write into nvm, not just a mention of the offset: the offset
+    # name appears on several lines, so a string search passes even when the
+    # assignment that matters has been removed.
+    writes = 0
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.If):
+            continue
+        if "readonly" not in (ast.get_source_segment(src, node.test) or ""):
+            continue
+        for sub in ast.walk(ast.Module(body=node.body, type_ignores=[])):
+            if isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    if (isinstance(t, ast.Subscript)
+                            and "nvm" in (ast.get_source_segment(src, t) or "")):
+                        writes += 1
+    assert writes >= 2, (
+        "a conversion refused because USB holds the disk is not written back "
+        f"into the queue ({writes} nvm writes in that branch), so unplugging "
+        "and rebooting will not resume it")
+    assert "convert.log" not in branch, (
+        "the readonly branch points at a log file that could not be written - "
+        "the filesystem it would live on is the one that was refused")
+
+    # and the reader has to restart when USB goes away
+    code = open(os.path.join(CPDIR, "code.py")).read()
+    assert "usb_connected" in code and "_usb_was_connected" in code, (
+        "the reader does not notice USB being unplugged, so a queued "
+        "conversion waits for a manual reset")
+    for node in ast.parse(code).body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if getattr(t, "id", None) == "_usb_was_connected":
+                    break
+    assert "supervisor.reload()" in code
+    print("  [ok] a USB-refused conversion stays queued; unplugging restarts")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -707,4 +839,6 @@ if __name__ == "__main__":
     test_convert_py_writes_nvram_the_reader_can_read()
     test_code_py_stays_out_of_the_readers_way()
     test_only_code_and_boot_sit_at_the_drive_root()
+    test_progress_forces_a_full_refresh_periodically()
+    test_a_conversion_refused_for_usb_stays_queued()
     print("\nALL CONVERT CHECKS PASSED")
