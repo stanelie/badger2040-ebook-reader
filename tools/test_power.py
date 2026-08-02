@@ -320,6 +320,74 @@ def test_cover_fits_the_panel_and_dithers():
             f"{expect}% - this looks like a threshold, not a dither")
     print("  [ok] covers letterbox to the panel and dither by tone")
 
+def test_cover_is_turned_counter_clockwise_to_fill_the_panel():
+    """A portrait cover upright uses a third of a landscape panel.
+
+    Fitted whole and upright, an 800x1104 cover lands at 90x125 in a 296x128
+    screen - correct, and too small to make out. Turned a quarter-turn its long
+    side runs along the panel's long side and it lands at 172x125, close to
+    twice the area.
+
+    The direction is easy to get backwards, so each edge of the source is
+    checked against where a counter-clockwise turn puts it.
+    """
+    sys.path.insert(0, CPDIR)
+    import coverimg
+
+    W, H, ROW = 296, 128, 296 >> 3
+
+    def rgb565(r, g, b):
+        return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+    def bbox(frame):
+        px = [(x, y) for y in range(H) for x in range(W)
+              if frame[y * ROW + (x >> 3)] & (0x80 >> (x & 7))]
+        assert px, "nothing was drawn"
+        xs = [p[0] for p in px]
+        ys = [p[1] for p in px]
+        return min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+
+    def black(x, y):
+        return rgb565(0, 0, 0)
+
+    for sw, sh in ((800, 1104), (600, 800), (1200, 1600)):
+        _, _, uw, uh = bbox(coverimg.pack(black, sw, sh, rotate=False))
+        _, _, tw, th = bbox(coverimg.pack(black, sw, sh, rotate=True))
+        assert tw * th > uw * uh * 1.5, (
+            f"{sw}x{sh}: turning it covers {tw}x{th} against {uw}x{uh} "
+            "upright - barely more than leaving it alone")
+        assert tw <= W and th <= H, f"{sw}x{sh}: turned image escapes the panel"
+
+    SW, SH = 200, 400
+    ax, ay, aw, ah = bbox(coverimg.pack(black, SW, SH, rotate=True))
+    edges = (
+        ("left", lambda x, y: rgb565(0, 0, 0) if x < 20 else rgb565(255, 255, 255),
+         "bottom"),
+        ("right", lambda x, y: rgb565(0, 0, 0) if x > SW - 21 else rgb565(255, 255, 255),
+         "top"),
+        ("top", lambda x, y: rgb565(0, 0, 0) if y < 40 else rgb565(255, 255, 255),
+         "left"),
+        ("bottom", lambda x, y: rgb565(0, 0, 0) if y > SH - 41 else rgb565(255, 255, 255),
+         "right"),
+    )
+    for name, paint, expect in edges:
+        x0, y0, w, h = bbox(coverimg.pack(paint, SW, SH, rotate=True))
+        cx, cy = x0 + w / 2, y0 + h / 2
+        got = ("left" if cx < ax + aw / 3 else
+               "right" if cx > ax + 2 * aw / 3 else
+               "top" if cy < ay + ah / 3 else
+               "bottom" if cy > ay + 2 * ah / 3 else "middle")
+        assert got == expect, (
+            f"the {name} edge of the cover ended up at the {got}; a "
+            f"counter-clockwise quarter-turn puts it at the {expect}")
+
+    _, _, uw, uh = bbox(coverimg.pack(black, 800, 1104, rotate=False))
+    assert uh > uw, "upright fitting no longer keeps the cover portrait"
+    assert coverimg.ROTATE_COVER is True, (
+        "covers are no longer turned by default, so they go back to using a "
+        "third of the screen")
+    print("  [ok] covers turn counter-clockwise and cover ~1.9x the panel")
+
 def main():
     print("sleep / inactivity behaviour:")
     test_stays_awake_before_timeout()
@@ -331,6 +399,7 @@ def main():
     test_sleep_shows_the_cover_or_leaves_the_page()
     test_sleep_frame_is_exactly_one_screen()
     test_cover_fits_the_panel_and_dithers()
+    test_cover_is_turned_counter_clockwise_to_fill_the_panel()
     print("\nALL POWER CHECKS PASSED")
     return 0
 

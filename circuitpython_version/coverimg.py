@@ -27,6 +27,14 @@ FRAME = WIDTH * HEIGHT // 8
 
 TARGET_DIR = "books"
 
+# Turn the cover a quarter-turn counter-clockwise before fitting it.
+# A cover is portrait and the panel is landscape, so upright it fits by height
+# and uses barely a third of the width - an 800x1104 cover lands at 93x125 in a
+# 296x128 screen. Turned, its long side runs along the panel's long side and it
+# lands at 176x128, close to twice the area. The reader is held sideways to
+# look at it, which for a sleeping device is no hardship.
+ROTATE_COVER = True
+
 # Ordered 4x4 dithering. On a panel with two levels, thresholding flat tone
 # makes a cover a silhouette; a dither matrix trades spatial detail for the
 # shading that is actually there. Cheap, and unlike error diffusion it needs no
@@ -56,15 +64,27 @@ def find_cover(txt_path):
     return None
 
 
-def pack(get_pixel, src_w, src_h, out=None, width=WIDTH, height=HEIGHT):
+def pack(get_pixel, src_w, src_h, out=None, width=WIDTH, height=HEIGHT,
+         rotate=False):
     """Fit an RGB565 source into one 1-bit MHMSB frame, dithered.
 
     `get_pixel(x, y)` returns RGB565. Kept free of jpegio so the scaling,
-    luminance and dithering can be exercised without a decoder or a device.
+    rotation, luminance and dithering can be exercised without a decoder or a
+    device.
 
-    The cover is portrait and the panel is landscape, so it is fitted by
-    whichever axis runs out first and centred; the margins stay white.
+    Fitted whole by whichever axis runs out first and centred; the margins stay
+    white. `rotate` turns the source a quarter-turn counter-clockwise first,
+    which is how a portrait cover gets to use the length of a landscape panel.
     """
+    if rotate:
+        # A quarter-turn counter-clockwise: the source's right-hand column
+        # becomes the top row, so reading across the turned image reads down
+        # the original. Sampled on the way past rather than copied - there is
+        # no room here for a second image.
+        original = get_pixel
+        last_x = src_w - 1
+        get_pixel = lambda x, y, _g=original, _l=last_x: _g(_l - y, x)
+        src_w, src_h = src_h, src_w
     if out is None:
         out = bytearray(width * height // 8)
     else:
@@ -165,7 +185,8 @@ def show_sleep_screen():
     return True
 
 
-def render(cover_path, out_path, width=WIDTH, height=HEIGHT, budget=40000):
+def render(cover_path, out_path, width=WIDTH, height=HEIGHT, budget=40000,
+           rotate=None):
     """Decode `cover_path` and write a sleep frame. True if one was written.
 
     `budget` caps the decoded bitmap, which has to exist whole and in one
@@ -188,6 +209,9 @@ def render(cover_path, out_path, width=WIDTH, height=HEIGHT, budget=40000):
         return False
 
     # Prefer the smallest decode that still has more detail than the panel.
+    # Turned, it is the cover's height that has to cover the panel's width.
+    need_w, need_h = (height, width) if (
+        ROTATE_COVER if rotate is None else rotate) else (width, height)
     chosen = None
     for s in (3, 2, 1, 0):
         sw, sh = src_w >> s, src_h >> s
@@ -196,7 +220,7 @@ def render(cover_path, out_path, width=WIDTH, height=HEIGHT, budget=40000):
         if sw * sh * 2 > budget:
             continue
         chosen = (s, sw, sh)
-        if sw >= width or sh >= height:
+        if sw >= need_w or sh >= need_h:
             break
     if chosen is None:
         print("[COVER] %dx%d will not decode within %d bytes"
@@ -212,7 +236,10 @@ def render(cover_path, out_path, width=WIDTH, height=HEIGHT, budget=40000):
               % (1 << scale, sw, sh, e))
         return False
 
-    frame = pack(lambda x, y: bitmap[x, y], sw, sh, width=width, height=height)
+    if rotate is None:
+        rotate = ROTATE_COVER
+    frame = pack(lambda x, y: bitmap[x, y], sw, sh, width=width, height=height,
+                 rotate=rotate)
     bitmap = None
 
     try:
