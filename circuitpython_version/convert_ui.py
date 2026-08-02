@@ -32,8 +32,9 @@ _CONV_NOTES = {
     "open":     "Reading archive...",
     "cover":    "Saving cover...",
     "start":    "",
-    "readonly": "Read-only! Unplug USB, retry",
+    "readonly": "USB holds the disk - unplug",
     "failed":   "Conversion failed",
+    "empty":    "Nothing was written!",
     "partial":  "Done - some chapters failed",
     "done":     "Done",
 }
@@ -168,7 +169,20 @@ def run_pending(epub_path):
         reader.state_save(0, b"", txt)
         reader.show_message(("Converted!", 100, 40), ("Opening book...", 80, 70))
     else:
-        time.sleep(2)       # the reason is already on the panel
+        # Deliberately not made the active book. Doing so opened the reader on
+        # a blank page with nothing to turn to, which looks like a reader bug
+        # rather than a conversion that produced nothing.
+        try:
+            import epub_xtract as _ex
+            done_n, total_n = _ex.LAST_COUNTS
+        except Exception:
+            done_n, total_n = 0, 0
+        reader.show_message(
+            ("Conversion failed", 75, 20),
+            ("%d of %d chapters written" % (done_n, total_n), 40, 45),
+            ("Book was NOT converted", 45, 70),
+            ("see .convert.log in /books", 30, 95))
+        time.sleep(6)
 
     try:
         import supervisor

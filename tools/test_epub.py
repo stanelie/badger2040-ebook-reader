@@ -23,6 +23,9 @@ import epub_xtract
 import uzipfile
 import inflate
 
+# Quiet by default, but keep the real one: the log-file test has to exercise
+# it, and stubbing it out silently emptied the log it was checking.
+_real_log_status = epub_xtract.log_status
 epub_xtract.log_status = lambda msg: None      # quiet
 
 
@@ -569,9 +572,146 @@ def main():
     test_eocd_scan_does_not_grab_64k()
     test_stored_blocks_stream_instead_of_buffering()
     test_output_paginates_in_the_reader()
+    test_empty_output_fails_and_leaves_a_log()
+    test_writing_is_refused_while_the_usb_host_holds_the_drive()
     print("\nALL EPUB CHECKS PASSED")
     return 0
 
+
+def test_writing_is_refused_while_the_usb_host_holds_the_drive():
+    """remount() succeeding is not the same as it being safe.
+
+    It can take write access while the host still has the drive mounted with
+    its own cached directory. Both then write, the host's view wins, and the
+    book comes back 0 bytes. A soft reload does not re-run boot.py, so a
+    conversion queued from the picker always arrives with the drive still
+    host-owned.
+    """
+    import sys as _sys
+    real_writable = epub_xtract._writable
+    saved = _sys.modules.get("supervisor")
+    try:
+        # A remount that WOULD succeed, so the only thing that can stop the
+        # write is the usb_connected check itself. Without this the test passes
+        # for the wrong reason: on a desktop there is no storage module, so
+        # ensure_writable refuses whether or not the guard is there.
+        state = {"writable": False}
+        epub_xtract._writable = lambda: state["writable"]
+        storage_mod = type(_sys)("storage")
+
+        def _remount(path, readonly=True):
+            state["writable"] = not readonly
+        storage_mod.remount = _remount
+        saved_storage = _sys.modules.get("storage")
+        _sys.modules["storage"] = storage_mod
+
+        mod = type(_sys)("supervisor")
+        mod.runtime = type("R", (), {"usb_connected": True})()
+        _sys.modules["supervisor"] = mod
+        assert epub_xtract.ensure_writable() is False, (
+            "the converter took the filesystem while the USB host held the "
+            "drive - the host's cached directory will truncate the book")
+        assert state["writable"] is False, "it remounted anyway"
+
+        # unplugged: taking it is exactly right
+        state["writable"] = False
+        mod.runtime = type("R", (), {"usb_connected": False})()
+        assert epub_xtract.ensure_writable() is True, (
+            "refused to take the filesystem with no host attached")
+        if saved_storage is None:
+            _sys.modules.pop("storage", None)
+        else:
+            _sys.modules["storage"] = saved_storage
+
+        # already writable (boot.py handed it over, or no host): allowed
+        epub_xtract._writable = lambda: True
+        mod = type(_sys)("supervisor")
+        mod.runtime = type("R", (), {"usb_connected": True})()
+        _sys.modules["supervisor"] = mod
+        assert epub_xtract.ensure_writable() is True, (
+            "refused to write even though the filesystem was already the "
+            "board's - boot.py hands it over when A is held")
+    finally:
+        epub_xtract._writable = real_writable
+        if saved is None:
+            _sys.modules.pop("supervisor", None)
+        else:
+            _sys.modules["supervisor"] = saved
+    print("  [ok] writing is refused while the USB host still holds the drive")
+
+def test_empty_output_fails_and_leaves_a_log():
+    """A book with nothing in it is a failure, and must say why on disk.
+
+    open("wb") creates the file before the first chapter is read, so checking
+    it exists passes even when every chapter failed - which is how a 0-byte
+    .txt reported "Converted!" and opened the reader on a blank page.
+
+    The log matters because the converter only owns the filesystem when the
+    board is on battery, and on battery there is no serial: every reason it
+    printed went nowhere.
+    """
+    tmp = tempfile.mkdtemp()
+    os.makedirs(os.path.join(tmp, "books"))
+    epub = os.path.join(tmp, "books", "Ghost.epub")
+    open(epub, "wb").close()
+
+    real = (epub_xtract.run_extraction, epub_xtract._writable,
+            epub_xtract.TARGET_DIR, epub_xtract.LAST_COUNTS,
+            epub_xtract.log_status)
+    epub_xtract.log_status = _real_log_status
+    epub_xtract._writable = lambda: True
+    epub_xtract.TARGET_DIR = tmp.lstrip("/") + "/books"
+    notes = []
+    try:
+        def wrote_nothing(path, progress=None):
+            open(epub_xtract.txt_path_for(path), "wb").close()
+            epub_xtract.LAST_COUNTS = (0, 42)
+            epub_xtract.log_status("every chapter failed")
+            return False
+        epub_xtract.run_extraction = wrote_nothing
+        got = epub_xtract.convert_book(
+            epub, progress=lambda *a: notes.append(a), keep_display=False)
+        assert got is None, f"a 0-byte book was reported as converted: {got}"
+        stages = [n[0] for n in notes]
+        assert "empty" in stages, f"no 'empty' notification, got {stages}"
+        empty = [n for n in notes if n[0] == "empty"][0]
+        assert empty[1:3] == (0, 42), (
+            f"the failure did not carry the chapter counts: {empty}")
+
+        # Readable before the log is closed: a conversion that resets the
+        # board mid-way must still leave its reason behind, which is the whole
+        # reason the writes are flushed per line rather than buffered.
+        epub_xtract.open_log(os.path.join(tmp, "books", "crash.log"))
+        epub_xtract.log_status("died right here")
+        assert "died right here" in open(os.path.join(tmp, "books", "crash.log")).read(), (
+            "log lines are buffered, so a crash loses the reason for it")
+        epub_xtract.close_log()
+
+        log = os.path.join(tmp, "books", "Ghost.convert.log")
+        assert os.path.exists(log), "no log written - nothing to read over USB"
+        text = open(log).read()
+        assert "every chapter failed" in text, (
+            "the log lost the reason; contents were: %r" % (text,))
+
+        # and a real conversion is still accepted, with its counts
+        notes.clear()
+        def wrote_something(path, progress=None):
+            with open(epub_xtract.txt_path_for(path), "wb") as f:
+                f.write(b"It was a dark and stormy night.\n")
+            epub_xtract.LAST_COUNTS = (42, 42)
+            return True
+        epub_xtract.run_extraction = wrote_something
+        got = epub_xtract.convert_book(
+            epub, progress=lambda *a: notes.append(a), keep_display=False)
+        assert got and os.path.getsize(got) > 0, "a real conversion was rejected"
+        final = [n for n in notes if n[0] in ("done", "partial")][0]
+        assert final[1:3] == (42, 42), f"counts not reported: {final}"
+    finally:
+        (epub_xtract.run_extraction, epub_xtract._writable,
+         epub_xtract.TARGET_DIR, epub_xtract.LAST_COUNTS,
+         epub_xtract.log_status) = real
+        epub_xtract.close_log()
+    print("  [ok] an empty conversion fails, reports counts, and leaves a log")
 
 if __name__ == "__main__":
     sys.exit(main())

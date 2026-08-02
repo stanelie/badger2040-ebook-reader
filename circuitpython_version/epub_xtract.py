@@ -43,16 +43,55 @@ TARGET_DIR = "books"
 # smaller than it needs, even with plenty free overall.
 VERBOSE = True
 MAX_STATUS_LINES = 6
+# (chapters written, chapters attempted) from the last run, for the caller to
+# report. A conversion can finish, write the file and still have extracted
+# nothing, which used to look exactly like success.
+LAST_COUNTS = (0, 0)
 STATUS_HISTORY = []
 
 
+# When the converter runs from the picker the board is on battery, because that
+# is the only way it owns the filesystem - and on battery there is no serial, so
+# every log line printed so far went nowhere. The same lines are written here
+# too, flushed as they go so that a conversion which dies mid-way still leaves
+# its reasons behind to be read over USB afterwards.
+_log_fh = None
+
+
+def open_log(path):
+    global _log_fh
+    close_log()
+    try:
+        _log_fh = open(path, "w")
+    except Exception as e:
+        _log_fh = None
+        print("[EXTRACTOR] no log file (%s)" % e)
+
+
+def close_log():
+    global _log_fh
+    if _log_fh is not None:
+        try:
+            _log_fh.close()
+        except Exception:
+            pass
+        _log_fh = None
+
+
 def log_status(msg):
-    """Append to history and print to the REPL."""
+    """Append to history, print to the REPL, and record in the log file."""
     global STATUS_HISTORY
     STATUS_HISTORY.append(msg)
     if len(STATUS_HISTORY) > MAX_STATUS_LINES:
         STATUS_HISTORY = STATUS_HISTORY[-MAX_STATUS_LINES:]
     print("[EXTRACTOR] %s" % msg)
+    if _log_fh is not None:
+        try:
+            _log_fh.write(msg)
+            _log_fh.write("\n")
+            _log_fh.flush()     # per line: a crash must not lose the reason
+        except Exception:
+            pass
 
 
 # -----------------------------------------------------------------
@@ -214,7 +253,27 @@ def ensure_writable():
     (hold A while resetting).
     """
     if _writable():
+        # Already ours: either boot.py handed it over (A held at reset) or
+        # there is no host attached. Safe to write.
         return True
+
+    # Not ours, so it would have to be taken with remount(). That call can
+    # succeed while the host still has the drive mounted - and then both sides
+    # write to the same filesystem from different ideas of what is on it. The
+    # host's cached directory wins, and the book that was just written comes
+    # back as a 0-byte file.
+    #
+    # A soft reload does not re-run boot.py, so a conversion queued from the
+    # picker always lands here with the drive still host-owned. Refuse.
+    try:
+        import supervisor
+        if supervisor.runtime.usb_connected:
+            log_status("USB host holds the filesystem - refusing to write.")
+            log_status("Unplug and convert on battery, or hold A while")
+            log_status("resetting so boot.py hands the filesystem over first.")
+            return False
+    except Exception:
+        pass        # no supervisor: fall through and try, as before
 
     try:
         import storage
@@ -650,6 +709,8 @@ def run_extraction(epub_path, progress=None):
 
             extracted = 0
             failures = []
+            global LAST_COUNTS
+            LAST_COUNTS = (0, total)
             with open(concat_path, "wb") as out:
                 for idx, member in enumerate(ordered, 1):
                     # Reclaim the previous chapter before asking for the next.
@@ -696,6 +757,7 @@ def run_extraction(epub_path, progress=None):
                         log_status("Failed %s: %s" % (member, e))
                         success = False
 
+            LAST_COUNTS = (extracted, total)
             _notify(progress, "chapter", extracted, total, base_name)
             log_status("--- EXTRACTION COMPLETE ---")
             log_status("Combined %d/%d files -> %s" % (extracted, total, concat_path))
@@ -736,20 +798,42 @@ def convert_book(epub_path, progress=None, keep_display=True):
     if not ensure_writable():
         _notify(progress, "readonly", 0, 0, "")
         return None
+    # Beside the book, so it comes off the board with it.
+    open_log(txt_path_for(epub_path)[:-4] + ".convert.log")
+    log_status("build: %s | %s" % (uzipfile.BUILD, inflate.BUILD))
     t0 = time.monotonic()
-    ok = run_extraction(epub_path, progress=progress)
+    try:
+        ok = run_extraction(epub_path, progress=progress)
+    except Exception as e:
+        log_status("run_extraction raised: %s" % e)
+        close_log()
+        raise
     log_status("Took %.1fs" % (time.monotonic() - t0))
     out = txt_path_for(epub_path)
     try:
-        os.stat(out)
+        written = os.stat(out)[6]
     except OSError:
         log_status("No text file was produced")
         _notify(progress, "failed", 0, 0, "")
         return None
+    # Existing is not the same as having anything in it. open("wb") creates the
+    # file before the first chapter is read, so every chapter failing - or the
+    # host clobbering the write - leaves a 0-byte book that reported success
+    # and opened to a blank page with nothing to turn to.
+    done_n, total_n = LAST_COUNTS
+    if not written:
+        log_status("The converted book is empty - %d of %d chapters written"
+                   % (done_n, total_n))
+        close_log()
+        _notify(progress, "empty", done_n, total_n, "")
+        return None
+    log_status("Wrote %d bytes to %s (%d of %d chapters)"
+               % (written, out, done_n, total_n))
+    close_log()
     # A partial book is still a book: if some chapters could not be
     # decompressed the rest is on disk and worth opening, so report the path
     # either way and let the caller say so.
-    _notify(progress, "done" if ok else "partial", 0, 0, "")
+    _notify(progress, "done" if ok else "partial", done_n, total_n, "")
     return out
 
 

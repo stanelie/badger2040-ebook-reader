@@ -486,6 +486,45 @@ def test_conversion_trigger_runs_after_everything_it_calls():
         "as a reader with no page buffers")
     print(f"  [ok] conversion trigger (line {trigger}) runs after all it calls")
 
+def test_failed_conversion_does_not_become_the_active_book():
+    """A conversion that produced nothing must not be opened.
+
+    Making it active sent the reader to a blank page with nothing to turn to,
+    which reads as a broken reader rather than a conversion that wrote nothing.
+    """
+    ui = open(os.path.join(CPDIR, "convert_ui.py")).read()
+    for node in ast.parse(ui).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "run_pending":
+            body = node
+
+    # state_save must be reachable only when there is a txt to open
+    saves = [n for n in ast.walk(body)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "state_save"]
+    assert saves, "run_pending never records the converted book"
+
+    guarded = []
+    for node in ast.walk(body):
+        if isinstance(node, ast.If):
+            seg = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+            if "state_save" in seg:
+                # The condition has to be the conversion result itself. Merely
+                # being inside *an* if is not enough - `if True:` keeps the
+                # shape and loses the meaning.
+                assert isinstance(node.test, ast.Name), (
+                    "the book is recorded under a condition that does not test "
+                    f"the conversion result: {ast.dump(node.test)}")
+                guarded.append(node)
+    assert guarded, (
+        "run_pending records the book unconditionally; a failed conversion "
+        "would be opened as a blank page")
+    for node in guarded:
+        seg = ast.dump(ast.Module(body=node.orelse, type_ignores=[]))
+        assert "state_save" not in seg, (
+            "the failure branch also records the book")
+    print("  [ok] a failed conversion is not made the active book")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -496,5 +535,6 @@ if __name__ == "__main__":
     test_pending_conversion_round_trips_through_nvram()
     test_conversion_boot_skips_the_readers_allocations()
     test_conversion_trigger_runs_after_everything_it_calls()
+    test_failed_conversion_does_not_become_the_active_book()
     test_code_py_stays_out_of_the_readers_way()
     print("\nALL CONVERT CHECKS PASSED")
