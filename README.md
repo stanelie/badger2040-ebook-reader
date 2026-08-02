@@ -12,12 +12,15 @@ Features :
 - ebook progress bar
 
 Installing (circuitpython version) :
-- copy everything in `circuitpython_version/` to the root of the CIRCUITPY drive, and make a
-  `/books` folder. Every dependency is in there, including `adafruit_framebuf.py` and its
-  `font5x8.bin` - nothing to download separately.
-- `adafruit_framebuf.py` is vendored as source (MIT, unmodified, license alongside it). If you
-  are short on RAM, replace it with the `.mpy` of the same name from the Adafruit CircuitPython
-  bundle: a `.py` is compiled into RAM at import, an `.mpy` is not.
+- copy the contents of `circuitpython_version/` to the root of the CIRCUITPY drive, keeping
+  `lib/` as `lib/`, and make a `/books` folder. Every dependency is in there - including
+  `lib/adafruit_framebuf.mpy` and the `font5x8.bin` it needs - so nothing has to be downloaded
+  separately.
+- keep `adafruit_framebuf` in `/lib`, not at the drive root. CircuitPython searches the root
+  first, so a `.py` copy there shadows the `.mpy` - and a `.py` is compiled into RAM at import
+  while an `.mpy` is not, which on a board that is already a few KB short decides whether it
+  boots. The unmodified upstream source is in `third_party/` for reference, deliberately not in
+  the install.
 - the board prints `boot: <n> bytes free` and names any missing data file at startup, which is
   the quickest way to spot a half-copied drive.
 
