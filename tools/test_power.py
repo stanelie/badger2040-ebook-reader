@@ -139,6 +139,171 @@ def test_picker_loop_checks_inactivity():
     print("  [ok] picker honours the timeout and refreshes the idle timer")
 
 
+def test_sleep_shows_the_cover_or_leaves_the_page():
+    """The sleep screen is a prepared frame, read straight in.
+
+    coverimg.py does the decoding, in the converter or by hand, because the
+    reader has the least free memory and the most fragmented heap of anything
+    on the board - a JPEG needs its scaled bitmap held whole and in one piece.
+    At sleep it is a file read into a buffer that already exists.
+
+    A book with no cover, or a frame of the wrong size, must leave the last
+    page on the panel rather than blank it.
+    """
+    import tempfile
+    sys.path.insert(0, CPDIR)
+    import coverimg
+
+    calls = {"refreshed": 0, "speeds": []}
+    buf = bytearray(4736)
+
+    class _Display:
+        rotation = 270
+
+        def _rotate_framebuffer(self, b):
+            return b
+
+        def set_speed(self, speed, no_flickering=False):
+            calls["speeds"].append((speed, no_flickering))
+
+    class _Reader:
+        text_file = ""
+        raw_working_buffer = buf
+        display = _Display()
+        ORIGINAL_SPEED = 4
+        ORIGINAL_NO_FLICKERING = True
+
+        @staticmethod
+        def update_display_fast(b, blocking=True):
+            calls["refreshed"] += 1
+
+    reader = _Reader()
+    saved = sys.modules.get("__main__")
+    sys.modules["__main__"] = reader
+    try:
+        tmp = tempfile.mkdtemp()
+        assert coverimg.show_sleep_cover() is False, (
+            "claimed a cover with no book open")
+
+        book = os.path.join(tmp, "Sway.txt")
+        open(book, "wb").write(b"text")
+        reader.text_file = book
+        assert coverimg.show_sleep_cover() is False, (
+            "claimed a cover that does not exist")
+        assert calls["refreshed"] == 0, "refreshed the panel with nothing to show"
+
+        frame = os.path.join(tmp, "Sway.sleep.bin")
+        open(frame, "wb").write(b"\xff" * 100)
+        assert coverimg.show_sleep_cover() is False, (
+            "accepted a truncated sleep frame")
+        assert calls["refreshed"] == 0, "pushed a truncated frame to the panel"
+
+        payload = bytes(range(256)) * (4736 // 256) + b"\x00" * (4736 % 256)
+        open(frame, "wb").write(payload)
+        assert coverimg.show_sleep_cover() is True, (
+            "did not show a valid sleep frame")
+        assert calls["refreshed"] == 1, "did not refresh the panel"
+        assert bytes(buf) == payload, "the frame on screen is not the one on disk"
+
+        # a full flicker refresh, then the speed put back: this image sits on
+        # the panel with the power off, possibly for weeks
+        assert calls["speeds"][0] == (0, False), (
+            "sleep screen drawn with a quick update; its ghosting would stay "
+            "on the panel for as long as the board is asleep")
+        assert calls["speeds"][-1] == (4, True), "display speed not restored"
+    finally:
+        if saved is None:
+            sys.modules.pop("__main__", None)
+        else:
+            sys.modules["__main__"] = saved
+
+    # and enter_sleep has to actually call it, without the panel-drawing code
+    # creeping back into the resident file
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "enter_sleep":
+            body = ast.get_source_segment(src, node)
+    assert "coverimg" in body and "show_sleep_cover" in body, (
+        "enter_sleep no longer shows the cover")
+    assert "def show_sleep_cover" not in src, (
+        "show_sleep_cover is back in code.py; it runs once per sleep and that "
+        "file is resident for the whole session")
+    print("  [ok] sleep shows a prepared cover, or leaves the page up")
+
+
+def test_sleep_frame_is_exactly_one_screen():
+    """coverimg writes what the reader reads: one framebuffer, no header."""
+    sys.path.insert(0, CPDIR)
+    import coverimg
+    assert coverimg.FRAME == 296 * 128 // 8 == 4736, (
+        f"coverimg builds a {coverimg.FRAME}-byte frame; the reader's buffer "
+        "is 4736")
+    frame = coverimg.pack(lambda x, y: 0x0000, 100, 138)
+    assert len(frame) == 4736, f"pack() produced {len(frame)} bytes"
+
+    assert coverimg.sleep_path_for("/books/Sway.txt") == "/books/Sway.sleep.bin"
+    assert coverimg.sleep_path_for("/books/Sway") == "/books/Sway.sleep.bin", (
+        "a book path without .txt gets a different name")
+
+    # Writer and reader must derive that name the same way. They are both in
+    # this module now, so check they go through the one helper rather than
+    # spelling the suffix out twice.
+    ui = open(os.path.join(CPDIR, "coverimg.py")).read()
+    for fn in ("show_sleep_cover", "render_for_book"):
+        for node in ast.parse(ui).body:
+            if isinstance(node, ast.FunctionDef) and node.name == fn:
+                body = ast.get_source_segment(ui, node)
+        assert "sleep_path_for(" in body, (
+            f"{fn} builds the sleep-frame path itself instead of using "
+            "sleep_path_for - the two sides can drift apart")
+    print("  [ok] the sleep frame is one screen, named the same on both sides")
+
+def test_cover_fits_the_panel_and_dithers():
+    """The cover is fitted whole and dithered, not cropped and thresholded.
+
+    A book cover is portrait and the panel is landscape, so it has to letterbox
+    rather than fill. And on a two-level panel, thresholding turns a cover into
+    a silhouette - the dither is what keeps any shading at all.
+    """
+    sys.path.insert(0, CPDIR)
+    import coverimg
+
+    def rgb565(r, g, b):
+        return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+    W, H, ROW = 296, 128, 296 >> 3
+
+    def inked(frame):
+        return [(x, y) for y in range(H) for x in range(W)
+                if frame[y * ROW + (x >> 3)] & (0x80 >> (x & 7))]
+
+    for sw, sh in ((600, 800), (1200, 1600), (100, 138), (128, 296), (2000, 100)):
+        px = inked(coverimg.pack(lambda x, y: rgb565(0, 0, 0), sw, sh))
+        xs = [p[0] for p in px]
+        ys = [p[1] for p in px]
+        w, h = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+        assert w <= W and h <= H, f"{sw}x{sh}: drawn area escapes the panel"
+        assert abs(sw / sh - w / h) / (sw / sh) < 0.08, (
+            f"{sw}x{sh}: fitted to {w}x{h}, aspect ratio not preserved")
+        assert min(xs) >= 0 and min(ys) >= 0
+
+    # tone
+    assert sum(coverimg.pack(lambda x, y: rgb565(255, 255, 255), W, H)) == 0, (
+        "a white cover put ink on the panel")
+    black = coverimg.pack(lambda x, y: rgb565(0, 0, 0), W, H)
+    assert sum(bin(b).count("1") for b in black) == W * H, (
+        "a black cover left gaps")
+
+    # a grey ramp must ink monotonically, and land near the requested level -
+    # that is the difference between a dither and a threshold
+    for level, expect in ((64, 75), (128, 50), (192, 25)):
+        f = coverimg.pack(lambda x, y, l=level: rgb565(l, l, l), W, H)
+        pct = 100 * sum(bin(b).count("1") for b in f) // (W * H)
+        assert abs(pct - expect) <= 8, (
+            f"grey {level} inked {pct}% of the panel, expected about "
+            f"{expect}% - this looks like a threshold, not a dither")
+    print("  [ok] covers letterbox to the panel and dither by tone")
+
 def main():
     print("sleep / inactivity behaviour:")
     test_stays_awake_before_timeout()
@@ -147,6 +312,9 @@ def main():
     test_activity_defers_sleep()
     test_save_skipped_without_a_book()
     test_picker_loop_checks_inactivity()
+    test_sleep_shows_the_cover_or_leaves_the_page()
+    test_sleep_frame_is_exactly_one_screen()
+    test_cover_fits_the_panel_and_dithers()
     print("\nALL POWER CHECKS PASSED")
     return 0
 

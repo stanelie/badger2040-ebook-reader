@@ -218,6 +218,16 @@ else:
         draw("Conversion failed")
         time.sleep(4)
     if txt:
+        # Turn the cover into a sleep screen now, while this program still has
+        # the board to itself. The reader could not: decoding needs the scaled
+        # image held whole, and it has neither the free memory nor a heap in
+        # one piece by the time it goes to sleep.
+        draw("Making sleep screen...")
+        try:
+            import coverimg
+            coverimg.render_for_book(txt)
+        except Exception as e:
+            print(f"no sleep screen: {e}")   # the reader keeps the last page
         try:
             set_active_book(txt)
         except Exception as e:

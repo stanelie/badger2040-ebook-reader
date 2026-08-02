@@ -35,6 +35,9 @@ Usage :
 - button A brings up the file picker, up and down arrows to select book, button A again to choose book
 - button UP for previous page, button DOWN for next page
 - long press button A for full refresh (circuitpython version)
+- when it sleeps it shows the book's cover, if that book has one; otherwise the page you were
+  reading stays on screen. Covers are turned into a sleep frame at conversion time - for books
+  converted before that existed, hold A while resetting and run `import coverimg; coverimg.main()`
 
   Note : because there is very little space on the rp2040, not many .epub files can be stored on it, maybe just one, and the conversion will eat up more space for the extracted text
 

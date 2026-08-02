@@ -208,7 +208,8 @@ except Exception as _e:
     print(f"interface font unavailable, falling back to font5x8: {_e}")
 
 LED_DUTY_CYCLE = 40
-INACTIVITY_TIMEOUT = 300
+# Short for testing. 300 is the sensible value for actually reading.
+INACTIVITY_TIMEOUT = 10
 
 # ---------------- LED -----------------
 led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
@@ -1755,7 +1756,15 @@ def enter_sleep():
     """Save the reading position, show the sleep screen and cut the display
     rail. Waking runs code.py from the top again."""
     force_save_state()  # Critical: save before power down
-    show_message(("Sleeping...", 110, 30), ("press any key to wake", 60, 90))
+    # The cover, if this book has one prepared. In coverimg rather than here
+    # because it runs once per sleep and code.py is resident all session; a
+    # failure just leaves the last page up, which is a perfectly good thing for
+    # an e-ink screen to show while it is asleep.
+    try:
+        import coverimg
+        coverimg.show_sleep_cover()
+    except Exception as e:
+        print(f"no sleep screen: {e}")
     board.ENABLE_DIO.value = False
 
 

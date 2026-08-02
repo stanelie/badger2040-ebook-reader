@@ -111,6 +111,16 @@ across stored / fixed-Huffman / dynamic-Huffman blocks, overlapping copies and
 window-crossing matches — and that forcing the fallback gives byte-identical
 results to the fast path.
 
+### test_power.py additions
+
+Covers the sleep screen: that a prepared frame is shown, that a missing or
+wrong-sized one leaves the last page up rather than blanking the panel, and
+that it is drawn with a full flicker refresh - the image sits there with the
+power off, so a quick update's ghosting would stay for as long as the board
+sleeps. Also checks the cover fitting: letterboxed whole rather than cropped,
+and dithered, since thresholding a cover on a two-level panel gives a
+silhouette (a 25% grey must ink about 25% of the screen, not none of it).
+
 ### test_convert.py
 
 Covers wiring the converter into the picker: that an EPUB is offered only until
