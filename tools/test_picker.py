@@ -131,9 +131,80 @@ def main():
     test_select_button_checked_first()
     test_no_page_buffer_cache()
     test_selection_moves_use_partial_refresh()
+    test_font_switch_failure_keeps_index_and_font_in_step()
     print("\nALL PICKER CHECKS PASSED")
     return 0
 
+
+def test_font_switch_failure_keeps_index_and_font_in_step():
+    """A font that will not load must leave the reader exactly as it was.
+
+    cycle_font advances font_index before loading, so a failed load used to
+    leave the index on the font that failed while FONT still held the previous
+    one. The reported name was wrong, and the next press cycled from the wrong
+    place, skipping a font entirely. Loading also held both fonts live at once,
+    asking for room for two on a heap the reader has been rendering into:
+
+        font switch error: memory allocation failed, allocating 3840 bytes
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+
+    class Font:
+        fail = set()
+
+        def __init__(self, path):
+            if path in Font.fail:
+                raise MemoryError("memory allocation failed, allocating 3840 bytes")
+            self.path = path
+
+    ns = {
+        "AVAILABLE_FONTS": [("a.pf", "A"), ("b.pf", "B"), ("c.pf", "C")],
+        "propfont": type("P", (), {"PropFont": Font}),
+        "gc": type("G", (), {"collect": staticmethod(lambda: None)})(),
+        "print": lambda *a, **k: None,
+        "save_font_index": lambda i: None,
+        "render_page_to_buffer": lambda *a: None,
+        "update_display_fast": lambda *a, **k: None,
+        "prerender_next": lambda: None,
+        "prerender_prev": lambda: None,
+        "current_offset": 0, "current_remainder": b"",
+        "current_rotated_buffer": None,
+        "font_index": 0, "FONT": Font("a.pf"),
+    }
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "cycle_font":
+            exec(ast.get_source_segment(src, node), ns)
+    cycle_font = ns["cycle_font"]
+
+    cycle_font()
+    assert ns["font_index"] == 1 and ns["FONT"].path == "b.pf", "normal switch"
+
+    Font.fail = {"c.pf"}
+    cycle_font()
+    assert ns["font_index"] == 1, (
+        f"index moved to {ns['font_index']} after a failed load - it no longer "
+        "matches FONT")
+    assert ns["FONT"] is not None, "FONT left as None after a failed switch"
+    assert ns["FONT"].path == "b.pf", f"FONT became {ns['FONT'].path}"
+
+    Font.fail = set()
+    cycle_font()
+    assert ns["font_index"] == 2 and ns["FONT"].path == "c.pf", (
+        "the font that failed was skipped on the next press")
+
+    # Whether both fonts are live at once is a memory property, and the stub
+    # above allocates nothing, so it cannot be observed by running the code -
+    # but it decides whether a switch needs room for one font or two. Pinned
+    # structurally instead: the old one must be dropped before the new load.
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "cycle_font":
+            body = ast.get_source_segment(src, node)
+    drop = body.find("FONT = None")
+    load = body.find("FONT = propfont.PropFont")
+    assert 0 <= drop < load, (
+        "cycle_font loads the new font while the old one is still referenced, "
+        "so a switch needs room for two fonts instead of one")
+    print("  [ok] a failed font switch leaves index and FONT in step")
 
 if __name__ == "__main__":
     sys.exit(main())

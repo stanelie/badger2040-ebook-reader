@@ -29,6 +29,20 @@ for _need in ("font5x8.bin", "hyphen_patterns.txt"):
     except OSError:
         print(f"MISSING FILE: {_need} - copy it from circuitpython_version/")
 
+# A library at the drive root shadows the copy in /lib, and CircuitPython
+# compiles a .py into RAM at import where an .mpy costs nothing. For
+# adafruit_framebuf that is roughly 30KB - enough on this board to lose the
+# quick-back buffer and fail a 3840-byte font load, neither of which points
+# anywhere near the actual cause.
+for _shadow in ("adafruit_framebuf.py",):
+    try:
+        os.stat(_shadow)
+        os.stat("lib/" + _shadow[:-3] + ".mpy")
+    except OSError:
+        continue
+    print(f"WASTING RAM: /{_shadow} shadows lib/{_shadow[:-3]}.mpy - "
+          f"delete /{_shadow} to get its memory back")
+
 # Optional on-device hyphenation. If the module or its pattern file is missing,
 # hyphenation is disabled gracefully (plain word-wrapping still works).
 try:
@@ -1543,8 +1557,15 @@ def cycle_font():
 
     if len(AVAILABLE_FONTS) < 2:
         return
+    previous = font_index
     font_index = (font_index + 1) % len(AVAILABLE_FONTS)
     try:
+        # Release the old font before building the new one. Loading it while
+        # the old one is still referenced needs room for both at once, and the
+        # second is asked for on a heap the reader has been rendering pages
+        # into - which is how a 3840-byte font fails with tens of KB free.
+        FONT = None
+        gc.collect()
         FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
         save_font_index(font_index)
         gc.collect()
@@ -1555,6 +1576,15 @@ def cycle_font():
         prerender_prev()
     except Exception as e:
         print(f"font switch error: {e}")
+        # font_index and FONT have to agree: leaving the index on the font that
+        # failed to load would report the wrong name and cycle from the wrong
+        # place, and the next press would skip a font.
+        font_index = previous
+        if FONT is None:
+            try:
+                FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+            except Exception as e2:
+                print(f"could not reload the previous font: {e2}")
 
 
 def factory_reset():
