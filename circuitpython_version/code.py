@@ -18,6 +18,17 @@ import pwmio
 import microcontroller
 from uc8151_circuitpython import UC8151
 
+# Report missing data files once, before they fail somewhere less obvious. A
+# missing module raises ImportError and names itself, so those need no check
+# here; these do not. font5x8.bin only surfaces from inside a text() call, and
+# a missing .pf font quietly falls back to another - so a half-copied drive can
+# look like a rendering or memory bug rather than a missing file.
+for _need in ("font5x8.bin", "hyphen_patterns.txt"):
+    try:
+        os.stat(_need)
+    except OSError:
+        print(f"MISSING FILE: {_need} - copy it from circuitpython_version/")
+
 # Optional on-device hyphenation. If the module or its pattern file is missing,
 # hyphenation is disabled gracefully (plain word-wrapping still works).
 try:
@@ -387,6 +398,18 @@ raw_working_buffer = bytearray(display.width * display.height // 8)
 current_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
 next_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
 
+# The driver's rotation buffer, claimed before anything optional. Nothing
+# reaches a rotated panel without it, and it used to allocate itself on first
+# use - which put the one buffer the display cannot work without at the BACK of
+# the queue, behind the optional one below. A board a few KB short would boot,
+# open the picker and die mid-rotation:
+#
+#     File "uc8151_circuitpython.py", line 839, in _rotate_framebuffer
+#     MemoryError: memory allocation failed, allocating 4736 bytes
+#
+# Taken here, the shortage lands on quick-back instead, which is built to lose.
+display.ensure_scratch()
+
 # Quick-back: a third page buffer holding the PREVIOUS page, so pressing up is
 # instant like pressing down already is. Costs one more screen buffer (~4.7KB)
 # but no extra rendering: on a page turn the page being left is already drawn,
@@ -418,6 +441,14 @@ prev_page_remainder = b""
 _scratch_fb = adafruit_framebuf.FrameBuffer(
     raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
 )
+
+# What is left once every buffer is placed. Printed because a board that is
+# simply short - a stock firmware instead of the quickboot build, or a library
+# shipped as .py so its bytecode is compiled into RAM rather than loaded from
+# .mpy - fails much later and looks like something else entirely.
+gc.collect()
+print(f"boot: {gc.mem_free()} bytes free, quick-back "
+      f"{'on' if QUICK_BACK_OK else 'OFF (not enough memory)'}")
 
 
 class _ScratchFrame:

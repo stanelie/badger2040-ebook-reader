@@ -816,6 +816,21 @@ class UC8151:
         self.update_count += 1
         return True
 
+    def ensure_scratch(self):
+        """Allocate the rotation buffer now, and return it.
+
+        Worth calling at startup, because this buffer is not optional: with a
+        rotated display nothing reaches the panel without it. Left to allocate
+        itself on first use, it is asked for after every optional buffer has
+        already taken its share, and comes last in a queue it should be at the
+        front of - a board a few KB short then boots, draws the picker, and dies
+        inside the rotation with nothing drawn.
+        """
+        size = self.physical_width * self.physical_height // 8
+        if self._rotate_scratch is None or len(self._rotate_scratch) != size:
+            self._rotate_scratch = bytearray(size)
+        return self._rotate_scratch
+
     def _rotate_framebuffer(self, fb):
         """
         Rotate the framebuffer - optimized for 270° rotation.
@@ -836,7 +851,7 @@ class UC8151:
 
         size = self.physical_width * self.physical_height // 8
         if self._rotate_scratch is None or len(self._rotate_scratch) != size:
-            self._rotate_scratch = bytearray(size)
+            self._rotate_scratch = self.ensure_scratch()
         rotated = self._rotate_scratch
         for i in range(size):
             rotated[i] = 0

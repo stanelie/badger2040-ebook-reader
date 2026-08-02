@@ -11,8 +11,19 @@ Features :
 - displays battery status
 - ebook progress bar
 
+Installing (circuitpython version) :
+- copy everything in `circuitpython_version/` to the root of the CIRCUITPY drive, and make a
+  `/books` folder. Every dependency is in there, including `adafruit_framebuf.py` and its
+  `font5x8.bin` - nothing to download separately.
+- `adafruit_framebuf.py` is vendored as source (MIT, unmodified, license alongside it). If you
+  are short on RAM, replace it with the `.mpy` of the same name from the Adafruit CircuitPython
+  bundle: a `.py` is compiled into RAM at import, an `.mpy` is not.
+- the board prints `boot: <n> bytes free` and names any missing data file at startup, which is
+  the quickest way to spot a half-copied drive.
+
 Usage :
 - put .txt or .epub ebook file into /books folder of the badger2040
+- selecting an .epub in the picker converts it on the spot, with a progress bar, then opens it
 - button A brings up the file picker, up and down arrows to select book, button A again to choose book
 - button UP for previous page, button DOWN for next page
 - long press button A for full refresh (circuitpython version)

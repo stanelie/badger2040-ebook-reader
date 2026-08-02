@@ -34,7 +34,7 @@ CMD = {"PON": 0x04, "PTIN": 0x91, "PTL": 0x90, "DTM2": 0x13,
 def make_driver():
     """A stub UC8151 carrying the real rotation and partial-update methods."""
     src = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
-    wanted = ("update_partial", "_rotate_framebuffer")
+    wanted = ("update_partial", "_rotate_framebuffer", "ensure_scratch")
     methods = {}
     for node in ast.parse(src).body:
         if isinstance(node, ast.ClassDef) and node.name == "UC8151":
@@ -248,7 +248,8 @@ def test_full_update_after_partial_repaints_everything():
     go straight back to the fast one.
     """
     src = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
-    wanted = ("update", "update_partial", "_rotate_framebuffer", "send_image")
+    wanted = ("update", "update_partial", "_rotate_framebuffer",
+              "send_image", "ensure_scratch")
     methods = {}
     for node in ast.parse(src).body:
         if isinstance(node, ast.ClassDef) and node.name == "UC8151":
@@ -320,10 +321,57 @@ def main():
     test_command_order()
     test_full_update_after_partial_repaints_everything()
     test_refuses_what_it_cannot_map()
+    test_rotation_scratch_is_claimed_before_optional_buffers()
     print("\nALL DISPLAY CHECKS PASSED")
     print("\nNote: the SPI conversation itself is not verifiable off-device.")
     return 0
 
+
+def test_rotation_scratch_is_claimed_before_optional_buffers():
+    """The buffer the panel cannot work without must not be allocated last.
+
+    _rotate_framebuffer used to create its scratch on first use, so the one
+    mandatory buffer was requested only after every optional buffer had taken
+    its share. A board a few KB short then booted, drew the picker, and died
+    inside the rotation with nothing on screen:
+
+        File "uc8151_circuitpython.py", line 839, in _rotate_framebuffer
+        MemoryError: memory allocation failed, allocating 4736 bytes
+
+    Claimed at startup instead, a shortage falls on quick-back, which is
+    written to lose it gracefully.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    lines = src.splitlines()
+
+    def line_of(needle):
+        for i, l in enumerate(lines):
+            if needle in l and not l.strip().startswith("#"):
+                return i
+        raise AssertionError("not found in code.py: " + needle)
+
+    assert line_of("display.ensure_scratch()") < line_of("prev_rotated_buffer = bytearray("), (
+        "the rotation scratch is claimed after the optional quick-back buffer; "
+        "a short board will crash in _rotate_framebuffer instead of simply "
+        "losing quick-back")
+
+    drv = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
+    assert "def ensure_scratch(self)" in drv, "driver lost ensure_scratch()"
+
+    # Moving the scratch earlier only helps if quick-back still absorbs the
+    # shortage, so its allocation must stay inside a MemoryError guard.
+    # Module level only: _rebuild_reader_state has its own guarded allocation,
+    # and matching that one instead would let the boot-time guard be removed
+    # without this noticing.
+    guarded = False
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Try):
+            seg = ast.get_source_segment(src, node) or ""
+            if "prev_rotated_buffer = bytearray(" in seg and "MemoryError" in seg:
+                guarded = True
+    assert guarded, "the boot-time quick-back allocation is no longer guarded "\
+                    "by MemoryError"
+    print("  [ok] rotation scratch claimed before optional buffers")
 
 if __name__ == "__main__":
     sys.exit(main())
