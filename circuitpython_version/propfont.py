@@ -8,9 +8,26 @@ of character counts.
 
 
 class PropFont:
-    def __init__(self, path, min_space_ratio=0.30):
-        d = open(path, "rb").read()
-        if d[:4] != b"PFN1":
+    def __init__(self, path, min_space_ratio=0.30, buf=None):
+        # `buf`, when given, is a buffer big enough for any installed font,
+        # reused for every load. Only one font is ever live, so reading into it
+        # costs nothing and - the point - allocates nothing: switching fonts on
+        # a heap the reader has been paginating into used to need a fresh ~4KB
+        # in one piece, which is exactly what a fragmented heap cannot give.
+        f = open(path, "rb")
+        try:
+            if buf is None:
+                d = f.read()
+            else:
+                n = f.readinto(buf)
+                if not n:
+                    raise ValueError("empty font file")
+                d = buf
+        finally:
+            f.close()
+        # bytes() around the slice: `buf` may be a bytearray, and comparing a
+        # bytearray slice to a bytes literal is not reliable across ports.
+        if bytes(d[:4]) != b"PFN1":
             raise ValueError("bad font file")
         self.d = d
         self.box_h = d[4]

@@ -311,7 +311,12 @@ def test_code_py_stays_out_of_the_readers_way():
     import marshal
     src = open(os.path.join(CPDIR, "code.py")).read()
     size = len(marshal.dumps(compile(src, "code.py", "exec")))
-    budget = 63000
+    # Raised from 63000 for the shared font buffer and the on-screen notice
+    # when a font switch fails - there is no serial on battery, so without it a
+    # failed press is just a button that does nothing, which is how that bug
+    # stayed unexplained. This is a ratchet against drift, not a hardware
+    # limit: move the line deliberately, with the reason written down.
+    budget = 64500
     assert size <= budget, (
         f"code.py compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "

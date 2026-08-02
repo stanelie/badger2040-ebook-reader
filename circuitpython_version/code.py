@@ -109,8 +109,31 @@ for _fp, _fn in FONT_FILES:
 if not AVAILABLE_FONTS:
     AVAILABLE_FONTS = [("literata.pf", "Literata")]  # last resort; errors if truly missing
 
+# One buffer, sized for the largest installed font and reused for every load.
+# Claimed now, with the screen buffers, while the heap is whole. Switching
+# fonts then allocates nothing at all - it used to need a fresh ~4KB in one
+# piece, on a heap the reader had spent the session paginating into, so it
+# worked when tested straight after launching and failed after actually
+# reading for a while:
+#
+#     font switch error: memory allocation failed, allocating 4352 bytes
+_font_buf = None
+try:
+    _biggest = 0
+    for _fp, _fn in AVAILABLE_FONTS:
+        try:
+            _sz = os.stat(_fp)[6]
+            if _sz > _biggest:
+                _biggest = _sz
+        except OSError:
+            pass
+    if _biggest:
+        _font_buf = bytearray(_biggest)
+except MemoryError:
+    _font_buf = None      # fall back to allocating per load, as before
+
 font_index = 0
-FONT = propfont.PropFont(AVAILABLE_FONTS[0][0])  # real selection loaded at startup from NVRAM
+FONT = propfont.PropFont(AVAILABLE_FONTS[0][0], buf=_font_buf)  # real selection loaded at startup from NVRAM
 
 LED_DUTY_CYCLE = 40
 INACTIVITY_TIMEOUT = 300
@@ -1445,17 +1468,20 @@ def cycle_font():
     font_index = (font_index + 1) % len(AVAILABLE_FONTS)
     try:
         try:
-            FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+            # Reads into the buffer claimed at startup, so nothing is allocated
+            # here and there is no block for a fragmented heap to refuse. The
+            # old font's data is overwritten in place - fine, because FONT is
+            # the only reference to it and is replaced on the same line.
+            FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0], buf=_font_buf)
         except MemoryError:
-            # No room for two fonts at once. Let the old one go and try again -
-            # but only after the ordinary attempt has failed. Releasing it up
-            # front is cheaper, and it is what a previous version did, but it
-            # means a load that then fails leaves the reader with no font at
-            # all; here that can only happen on a heap too small for one font,
-            # which is already unrecoverable.
+            # Only reachable when there is no shared buffer (it could not be
+            # claimed at startup) and a per-load allocation is being made after
+            # all. Release the old font and retry - but only now, after the
+            # ordinary attempt has failed, so that a switch which then fails
+            # cannot leave the reader with no font at all.
             FONT = None
             gc.collect()
-            FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+            FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0], buf=_font_buf)
         save_font_index(font_index)
         gc.collect()
         render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
@@ -1465,15 +1491,33 @@ def cycle_font():
         prerender_prev()
     except Exception as e:
         print(f"font switch error: {e}")
+        # On battery there is no serial, so a failed press is otherwise just a
+        # button that does nothing - which is how this went unexplained: it
+        # worked every time it was tried straight after launching from the IDE,
+        # and failed after actually reading for a while.
+        try:
+            show_message(("Font switch failed", 70, 40), (str(e)[:36], 8, 70))
+            time.sleep(1.5)
+        except Exception:
+            pass
         # font_index and FONT have to agree: leaving the index on the font that
         # failed to load would report the wrong name and cycle from the wrong
         # place, and the next press would skip a font.
         font_index = previous
         if FONT is None:
             try:
-                FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+                FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0],
+                                         buf=_font_buf)
             except Exception as e2:
                 print(f"could not reload the previous font: {e2}")
+        # The error screen replaced the page; put the page back.
+        if FONT is not None:
+            try:
+                render_page_to_buffer(current_offset, current_remainder,
+                                      current_rotated_buffer)
+                update_display_fast(current_rotated_buffer)
+            except Exception as e3:
+                print(f"could not redraw after a failed font switch: {e3}")
 
 
 def factory_reset():
@@ -1693,7 +1737,7 @@ history_clear()
 font_index = load_font_index() % len(AVAILABLE_FONTS)
 if font_index != 0:
     try:
-        FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0])
+        FONT = propfont.PropFont(AVAILABLE_FONTS[font_index][0], buf=_font_buf)
     except Exception as e:
         print(f"font load failed: {e}")
         font_index = 0

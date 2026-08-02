@@ -124,6 +124,75 @@ def test_selection_moves_use_partial_refresh():
     print("  [ok] selection moves use a partial refresh, with a full fallback")
 
 
+def test_shared_font_buffer_loads_identically():
+    """Every installed font must load byte-identically through the shared buffer.
+
+    Fonts are read into one buffer claimed at startup, so switching allocates
+    nothing - which is the whole point: a fresh ~4KB in one piece is exactly
+    what a heap fragmented by a session of paginating cannot supply. It worked
+    every time it was tested right after launching from the IDE, and failed
+    on battery after actually reading for a while:
+
+        font switch error: memory allocation failed, allocating 4352 bytes
+
+    Reusing one buffer is only safe if a reload leaves no trace of the font
+    before it, so each font is checked against a standalone load.
+    """
+    import propfont
+    fonts = [f for f in os.listdir(CPDIR) if f.endswith(".pf")]
+    assert fonts, "no .pf fonts installed"
+    biggest = max(os.path.getsize(os.path.join(CPDIR, f)) for f in fonts)
+    buf = bytearray(biggest)
+
+    sample = "The quick brown fox; ijl WM 1234 -- Hamburgefonstiv"
+    # cycle through more than once, so each load has to overwrite a different
+    # previous font rather than a blank buffer
+    for round_ in range(2):
+        for name in fonts:
+            path = os.path.join(CPDIR, name)
+            shared = propfont.PropFont(path, buf=buf)
+            alone = propfont.PropFont(path)
+            assert shared.text_width(sample) == alone.text_width(sample), (
+                f"{name}: width differs when loaded through the shared buffer")
+            assert (shared.box_h, shared.baseline, shared.first,
+                    shared.count, shared.space_w) == (
+                   alone.box_h, alone.baseline, alone.first,
+                   alone.count, alone.space_w), f"{name}: header differs"
+            for ch in sample:
+                assert shared._rec(ch) == alone._rec(ch), (
+                    f"{name}: glyph {ch!r} differs through the shared buffer")
+
+    # the buffer must be big enough for every font, or a switch silently
+    # truncates the largest one
+    for name in fonts:
+        size = os.path.getsize(os.path.join(CPDIR, name))
+        assert size <= len(buf), f"{name} ({size}) exceeds the buffer ({len(buf)})"
+
+    # a short buffer must be rejected, not quietly produce a broken font
+    try:
+        propfont.PropFont(os.path.join(CPDIR, fonts[0]), buf=bytearray(2))
+        raise AssertionError("a 2-byte buffer was accepted as a font")
+    except ValueError:
+        pass
+
+    # An unreadable font read into a buffer that still holds the PREVIOUS font
+    # is the dangerous case: the read returns nothing, the old font's header is
+    # still sitting there, and the magic check passes. Without a length check
+    # the switch silently "succeeds" with the previous font's glyphs.
+    import tempfile
+    empty = os.path.join(tempfile.mkdtemp(), "empty.pf")
+    open(empty, "wb").close()
+    propfont.PropFont(os.path.join(CPDIR, fonts[0]), buf=buf)   # prime it
+    try:
+        propfont.PropFont(empty, buf=buf)
+        raise AssertionError(
+            "an empty font file was accepted - the buffer still held the "
+            "previous font, so the switch silently kept the old glyphs")
+    except ValueError:
+        pass
+    print(f"  [ok] {len(fonts)} fonts load identically through one "
+          f"{biggest}-byte buffer")
+
 def main():
     print("book picker:")
     test_paging_matches_old_behaviour()
@@ -132,6 +201,7 @@ def main():
     test_no_page_buffer_cache()
     test_selection_moves_use_partial_refresh()
     test_font_switch_failure_keeps_index_and_font_in_step()
+    test_shared_font_buffer_loads_identically()
     print("\nALL PICKER CHECKS PASSED")
     return 0
 
@@ -152,7 +222,7 @@ def test_font_switch_failure_keeps_index_and_font_in_step():
     class Font:
         fail = set()
 
-        def __init__(self, path):
+        def __init__(self, path, buf=None):
             if path in Font.fail:
                 raise MemoryError("memory allocation failed, allocating 3840 bytes")
             self.path = path
@@ -170,6 +240,12 @@ def test_font_switch_failure_keeps_index_and_font_in_step():
         "current_offset": 0, "current_remainder": b"",
         "current_rotated_buffer": None,
         "font_index": 0, "FONT": Font("a.pf"),
+        # shared font buffer, and the on-screen notice shown when a switch
+        # fails - there is no serial on battery, so the screen is the only
+        # place a failure can be reported
+        "_font_buf": bytearray(8),
+        "show_message": lambda *a, **k: None,
+        "time": type("T", (), {"sleep": staticmethod(lambda s: None)})(),
     }
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "cycle_font":
@@ -206,6 +282,12 @@ def test_font_switch_failure_keeps_index_and_font_in_step():
     assert 0 <= first_load < drop, (
         "cycle_font releases the old font before its first load attempt; a "
         "failure then leaves the reader with no font at all")
+
+    # Whether the load reuses the shared buffer is not observable by running
+    # the stub - it allocates nothing either way - but it is the entire fix.
+    assert "buf=_font_buf" in body, (
+        "cycle_font loads a font without the shared buffer, so a switch "
+        "allocates ~4KB in one piece on a heap fragmented by reading")
     handler = body.find("except MemoryError:")
     assert 0 <= handler < drop, (
         "the old font is released outside the MemoryError fallback")

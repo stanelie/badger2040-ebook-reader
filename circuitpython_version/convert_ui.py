@@ -117,7 +117,8 @@ def _rebuild_reader_state():
     gc.collect()
     if getattr(reader, "FONT", None) is None:
         reader.FONT = reader.propfont.PropFont(
-            reader.AVAILABLE_FONTS[reader.load_font_index()][0])
+            reader.AVAILABLE_FONTS[reader.load_font_index()][0],
+            buf=getattr(reader, "_font_buf", None))
     size = display.physical_width * display.physical_height // 8
     for name in ("current_rotated_buffer", "next_rotated_buffer"):
         if getattr(reader, name, None) is None:
