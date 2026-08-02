@@ -519,7 +519,12 @@ display = UC8151(
     rst=board.INKY_RST,
     busy=board.INKY_BUSY,
     rotation=270,
-    external_font=vga2_8x16, 
+    # external_font wins in the driver's text(), so vga2_8x16 draws every piece
+    # of reader chrome and the two arguments below are never reached from
+    # display.text(). font5x8.bin is still needed on the drive, though: the
+    # status lines call temp_fb.text(font_name="font5x8.bin") directly, and
+    # convert.py runs without an external font at all.
+    external_font=vga2_8x16,
     use_framebuf_font=True,
     font_path="font5x8.bin",
     speed=ORIGINAL_SPEED,
