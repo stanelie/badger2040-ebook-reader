@@ -132,6 +132,54 @@ def _rebuild_reader_state():
     gc.collect()
 
 
+def run_pending(epub_path):
+    """Convert a queued EPUB during startup, then restart into the result.
+
+    Called from code.py before the reader has built anything, so the converter
+    has the heap essentially to itself. Does not return: it restarts either
+    way, because at this point the board has no page buffers, no font and no
+    hyphenation patterns and is in no state to read a book.
+    """
+    # Cleared BEFORE the work, not after. A conversion that fails hard enough
+    # to reset the board would otherwise be retried on the next boot, and the
+    # next, with no way to reach the picker and cancel it.
+    reader.clear_pending()
+
+    _conv.update({"px": -1, "name": epub_path.split("/")[-1], "total": 0,
+                  "done": 0, "full_drawn": False})
+    reader.led_on()
+    _convert_progress("open", 0, 0, _conv["name"])
+
+    txt = None
+    try:
+        import epub_xtract
+        txt = epub_xtract.convert_book(epub_path, progress=_convert_progress)
+    except MemoryError as e:
+        print(f"conversion ran out of memory: {e}")
+        reader.show_message(("Out of memory", 90, 40), (str(e)[:36], 8, 70))
+        time.sleep(4)
+    except Exception as e:
+        print(f"conversion error: {e}")
+        reader.show_message(("Conversion failed", 75, 40), (str(e)[:36], 8, 70))
+        time.sleep(4)
+    reader.led_off()
+
+    if txt:
+        reader.state_save(0, b"", txt)
+        reader.show_message(("Converted!", 100, 40), ("Opening book...", 80, 70))
+    else:
+        time.sleep(2)       # the reason is already on the panel
+
+    try:
+        import supervisor
+        supervisor.reload()
+    except Exception as e:
+        print(f"reload unavailable after converting: {e}")
+        reader.show_message(("Please reset the board", 55, 55))
+    while True:
+        time.sleep(1)
+
+
 def convert_epub(epub_path):
     """Convert the chosen EPUB and open the result.
 

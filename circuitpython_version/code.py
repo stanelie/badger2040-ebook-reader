@@ -18,6 +18,55 @@ import pwmio
 import microcontroller
 from uc8151_circuitpython import UC8151
 
+# --- PENDING CONVERSION, READ BEFORE ANYTHING IS ALLOCATED ---
+# Choosing an EPUB in the picker does not convert it there and then. It records
+# the path here and restarts, so the conversion runs on a boot that has built
+# none of the reader: no hyphenation patterns, no font, one screen buffer
+# instead of five.
+#
+# Freeing all of that first is not the same thing and does not work. Opening an
+# archive needs a 32KB streaming window in ONE piece, and after a session of
+# reading there is no such piece left - releasing objects gives the bytes back
+# but leaves the heap in fragments, so the converter failed where it had plenty
+# of memory by the total:
+#
+#     Out of memory - convert over USB instead
+#
+# Offsets 3902-4023 are free: book entries end at 3848 and the font byte is at
+# 3900-3901.
+NVM = microcontroller.nvm
+NVM_O_PENDING = 3902          # magic, length, then the path
+PENDING_MAGIC = 0xC9
+PENDING_MAX = 120
+
+
+def load_pending():
+    """Path of an EPUB queued for conversion, or "" if there is none."""
+    try:
+        head = bytes(NVM[NVM_O_PENDING:NVM_O_PENDING + 2])
+        if head[0] != PENDING_MAGIC or not 0 < head[1] <= PENDING_MAX:
+            return ""
+        start = NVM_O_PENDING + 2
+        return bytes(NVM[start:start + head[1]]).decode()
+    except Exception:
+        return ""
+
+
+def save_pending(path):
+    b = path.encode()[:PENDING_MAX]
+    NVM[NVM_O_PENDING:NVM_O_PENDING + 2] = bytes([PENDING_MAGIC, len(b)])
+    NVM[NVM_O_PENDING + 2:NVM_O_PENDING + 2 + len(b)] = b
+
+
+def clear_pending():
+    try:
+        NVM[NVM_O_PENDING:NVM_O_PENDING + 1] = bytes([0])
+    except Exception:
+        pass
+
+
+PENDING_CONVERT = load_pending()
+
 # --- SCREEN BUFFERS, CLAIMED FIRST ---
 # Every screen buffer is taken here, before the hyphenation patterns, the font
 # and the display driver have allocated anything, because the collector does
@@ -35,9 +84,18 @@ from uc8151_circuitpython import UC8151
 _BUF_SIZE = 296 * 128 // 8
 
 raw_working_buffer = bytearray(_BUF_SIZE)
-current_rotated_buffer = bytearray(_BUF_SIZE)
-next_rotated_buffer = bytearray(_BUF_SIZE)
 _early_rotate_scratch = bytearray(_BUF_SIZE)
+
+# A conversion draws one progress screen and then restarts the board, so it
+# needs no page buffers at all. Leaving them unallocated is most of the point
+# of running it on its own boot: the converter gets an untouched heap rather
+# than one with five screen buffers already carved out of it.
+if PENDING_CONVERT:
+    current_rotated_buffer = None
+    next_rotated_buffer = None
+else:
+    current_rotated_buffer = bytearray(_BUF_SIZE)
+    next_rotated_buffer = bytearray(_BUF_SIZE)
 
 # Quick-back: a third page buffer holding the PREVIOUS page, so pressing up is
 # instant like pressing down already is. Costs one more screen buffer (~4.7KB)
@@ -45,7 +103,7 @@ _early_rotate_scratch = bytearray(_BUF_SIZE)
 # so it becomes the previous page just by rotating which buffer is which (and
 # vice-versa when going back). Last of the five, so it is the one that loses if
 # the board cannot hold them all - back-navigation then renders on demand.
-QUICK_BACK = True
+QUICK_BACK = True and not PENDING_CONVERT
 try:
     prev_rotated_buffer = bytearray(_BUF_SIZE) if QUICK_BACK else None
     QUICK_BACK_OK = QUICK_BACK
@@ -83,7 +141,10 @@ for _shadow in ("adafruit_framebuf.py",):
 # hyphenation is disabled gracefully (plain word-wrapping still works).
 try:
     import hyphenator
-    hyphenator._load()  # force-load the pattern blob now so per-word calls can't fail on I/O
+    if not PENDING_CONVERT:
+        # 31.5KB, and a conversion never lays out a page. Skipped rather than
+        # loaded and freed: freeing it back would leave the hole behind.
+        hyphenator._load()  # force-load now so per-word calls can't fail on I/O
     _HYPHEN_OK = True
 except Exception as _e:
     print(f"hyphenator unavailable: {_e}")
@@ -120,7 +181,7 @@ if not AVAILABLE_FONTS:
 _font_buf = None
 try:
     _biggest = 0
-    for _fp, _fn in AVAILABLE_FONTS:
+    for _fp, _fn in (() if PENDING_CONVERT else AVAILABLE_FONTS):
         try:
             _sz = os.stat(_fp)[6]
             if _sz > _biggest:
@@ -133,7 +194,9 @@ except MemoryError:
     _font_buf = None      # fall back to allocating per load, as before
 
 font_index = 0
-FONT = propfont.PropFont(AVAILABLE_FONTS[0][0], buf=_font_buf)  # real selection loaded at startup from NVRAM
+# The progress screen draws through the driver's own text routine, so a
+# conversion boot needs no reading font.
+FONT = None if PENDING_CONVERT else propfont.PropFont(AVAILABLE_FONTS[0][0], buf=_font_buf)
 
 LED_DUTY_CYCLE = 40
 INACTIVITY_TIMEOUT = 300
@@ -497,6 +560,12 @@ prev_page_remainder = b""
 _scratch_fb = adafruit_framebuf.FrameBuffer(
     raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
 )
+
+# The panel exists and nothing else has been built, which is the whole reason
+# the picker queued this instead of converting in place. Restarts when done.
+if PENDING_CONVERT:
+    import convert_ui
+    convert_ui.run_pending(PENDING_CONVERT)
 
 # What is left once every buffer is placed - free memory AND the largest single
 # block, because those answer different questions and only the second one
@@ -1208,7 +1277,27 @@ def _xor_row_band(buf, row):
 
 
 def convert_epub(epub_path):
-    """Convert the chosen EPUB and open the result. See convert_ui.py."""
+    """Queue the EPUB and restart, so the conversion gets an untouched heap.
+
+    Converting here instead fails on a heap the reader has been paginating
+    into: the archive needs a 32KB streaming window in one piece, and freeing
+    the reader's own buffers first returns the bytes without closing the gaps.
+
+    Only returns if the restart could not happen - an IDE holding the serial
+    port sends the board to the REPL instead - in which case it falls back to
+    converting in place, which is what it used to do always.
+    """
+    try:
+        save_pending(epub_path)
+    except Exception as e:
+        print(f"could not queue the conversion: {e}")
+    show_message(("Converting EPUB", 75, 40), ("Restarting...", 90, 70))
+    try:
+        import supervisor
+        supervisor.reload()          # does not return
+    except Exception as e:
+        print(f"reload unavailable, converting in place: {e}")
+    clear_pending()
     import convert_ui
     return convert_ui.convert_epub(epub_path)
 

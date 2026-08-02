@@ -361,7 +361,7 @@ def test_rotation_scratch_is_claimed_before_optional_buffers():
     # left by everything before it - which is how a 4736-byte buffer failed on
     # a board with 70160 bytes still free.
     for later in ("hyphenator._load()",
-                  "FONT = propfont.PropFont(AVAILABLE_FONTS[0][0], buf=_font_buf)",
+                  "propfont.PropFont(AVAILABLE_FONTS[0][0]",
                   "display = UC8151"):
         assert quickback < line_of(later), (
             f"screen buffers are allocated after {later!r}; they must be "

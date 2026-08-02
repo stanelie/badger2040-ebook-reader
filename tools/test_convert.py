@@ -311,12 +311,17 @@ def test_code_py_stays_out_of_the_readers_way():
     import marshal
     src = open(os.path.join(CPDIR, "code.py")).read()
     size = len(marshal.dumps(compile(src, "code.py", "exec")))
-    # Raised from 63000 for the shared font buffer and the on-screen notice
-    # when a font switch fails - there is no serial on battery, so without it a
-    # failed press is just a button that does nothing, which is how that bug
-    # stayed unexplained. This is a ratchet against drift, not a hardware
-    # limit: move the line deliberately, with the reason written down.
-    budget = 64500
+    # 63000 -> 64500: shared font buffer, and the on-screen notice when a font
+    # switch fails (no serial on battery, so a failure was otherwise a button
+    # that did nothing).
+    # 64500 -> 67000: queueing a conversion across a restart. The code has to
+    # live here because it runs before anything else is built - that is the
+    # point of it - and it buys back far more than it costs: a conversion boot
+    # now skips the 31.5KB pattern blob, the font and three screen buffers.
+    #
+    # A ratchet against drift, not a hardware limit. Move it deliberately, and
+    # write down why - two raises in a row is worth noticing.
+    budget = 67000
     assert size <= budget, (
         f"code.py compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "
@@ -330,6 +335,76 @@ def test_code_py_stays_out_of_the_readers_way():
             f"{leaked} is back in code.py; it belongs in convert_ui.py")
     print(f"  [ok] code.py is {size} bytes, within the {budget} budget")
 
+def test_pending_conversion_round_trips_through_nvram():
+    """The queued path must survive a restart, and never boot-loop.
+
+    The picker records the EPUB and restarts so the conversion runs before the
+    reader allocates anything - freeing memory afterwards is not equivalent,
+    because it returns the bytes without closing the gaps, and the archive
+    needs a 32KB window in one piece.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    nvm = bytearray(4096)
+    ns, _ = _load(("load_pending", "save_pending", "clear_pending"),
+                  {"NVM": nvm,
+                   "NVM_O_PENDING": _const(src, "NVM_O_PENDING"),
+                   "PENDING_MAGIC": _const(src, "PENDING_MAGIC"),
+                   "PENDING_MAX": _const(src, "PENDING_MAX")})
+
+    assert ns["load_pending"]() == "", "blank NVRAM must not look like a job"
+
+    for path in ("/books/The Last Town.epub", "/books/a.epub",
+                 "/books/" + "x" * 100 + ".epub"):
+        ns["save_pending"](path)
+        got = ns["load_pending"]()
+        assert got == path[:_const(src, "PENDING_MAX")], (
+            f"queued {path!r}, read back {got!r}")
+        ns["clear_pending"]()
+        assert ns["load_pending"]() == "", "clear_pending left a job behind"
+
+    # must not collide with the book entries or the font byte
+    start = _const(src, "NVM_O_PENDING")
+    entries_end = _const(src, "NVM_O_ENTRIES") + \
+        _const(src, "MAX_BOOKS") * _const(src, "ENTRY_SIZE")
+    assert start >= entries_end, (
+        f"pending region at {start} overlaps book entries ending at {entries_end}")
+    assert start > _const(src, "NVM_O_FONT_INDEX"), "overlaps the font byte"
+    assert start + 2 + _const(src, "PENDING_MAX") <= 4096, "runs past NVRAM"
+
+    # the flag must be cleared BEFORE the work, or a conversion that resets the
+    # board is retried forever with no way to reach the picker and cancel it
+    ui = open(os.path.join(CPDIR, "convert_ui.py")).read()
+    for node in ast.parse(ui).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "run_pending":
+            body = ast.get_source_segment(ui, node)
+    cleared = body.find("clear_pending()")
+    worked = body.find("convert_book(")
+    assert 0 <= cleared < worked, (
+        "run_pending converts before clearing the queued job; a conversion "
+        "that resets the board would then repeat on every boot")
+    print("  [ok] queued conversion round-trips, and is cleared before it runs")
+
+
+def test_conversion_boot_skips_the_readers_allocations():
+    """A conversion boot must not build what it will never use.
+
+    Skipping is not the same as freeing and then converting: the 31.5KB pattern
+    blob, the font and the page buffers each leave a hole behind when released,
+    and it is a contiguous 32KB window the archive needs.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    for guarded in ("hyphenator._load()",
+                    "propfont.PropFont(AVAILABLE_FONTS[0][0]",
+                    "current_rotated_buffer = bytearray(_BUF_SIZE)"):
+        idx = src.find(guarded)
+        assert idx > 0, f"{guarded} not found in code.py"
+        window = src[max(0, idx - 400):idx]
+        assert "PENDING_CONVERT" in window, (
+            f"{guarded} is not skipped on a conversion boot - it will be "
+            "allocated and then freed, leaving the hole that made the "
+            "conversion fail")
+    print("  [ok] a conversion boot skips the blob, the font and the page buffers")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -337,5 +412,7 @@ if __name__ == "__main__":
     test_progress_bar_fills_monotonically_and_completely()
     test_zero_chapters_does_not_divide_by_zero()
     test_reader_memory_is_freed_but_the_panel_survives()
+    test_pending_conversion_round_trips_through_nvram()
+    test_conversion_boot_skips_the_readers_allocations()
     test_code_py_stays_out_of_the_readers_way()
     print("\nALL CONVERT CHECKS PASSED")
