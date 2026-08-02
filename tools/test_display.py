@@ -350,10 +350,22 @@ def test_rotation_scratch_is_claimed_before_optional_buffers():
                 return i
         raise AssertionError("not found in code.py: " + needle)
 
-    assert line_of("display.ensure_scratch()") < line_of("prev_rotated_buffer = bytearray("), (
+    quickback = line_of("prev_rotated_buffer = bytearray(_BUF_SIZE) if QUICK_BACK")
+    assert line_of("_early_rotate_scratch = bytearray(") < quickback, (
         "the rotation scratch is claimed after the optional quick-back buffer; "
         "a short board will crash in _rotate_framebuffer instead of simply "
         "losing quick-back")
+
+    # And every screen buffer must come before the big consumers. The collector
+    # does not move objects, so whatever is asked for last has to fit in a gap
+    # left by everything before it - which is how a 4736-byte buffer failed on
+    # a board with 70160 bytes still free.
+    for later in ("hyphenator._load()",
+                  "FONT = propfont.PropFont(AVAILABLE_FONTS[0][0])",
+                  "display = UC8151"):
+        assert quickback < line_of(later), (
+            f"screen buffers are allocated after {later!r}; they must be "
+            "claimed first, while the heap is still in one piece")
 
     drv = open(os.path.join(CPDIR, "uc8151_circuitpython.py")).read()
     assert "def ensure_scratch(self)" in drv, "driver lost ensure_scratch()"

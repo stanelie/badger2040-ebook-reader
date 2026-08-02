@@ -18,6 +18,42 @@ import pwmio
 import microcontroller
 from uc8151_circuitpython import UC8151
 
+# --- SCREEN BUFFERS, CLAIMED FIRST ---
+# Every screen buffer is taken here, before the hyphenation patterns, the font
+# and the display driver have allocated anything, because the collector does
+# not move objects: whatever is asked for last has to fit in a gap left by
+# everything before it. Allocated at the end instead, the last one failed on a
+# board with fifteen times its size still free -
+#
+#     boot: 70160 bytes free, quick-back OFF
+#
+# which is not a shortage of memory but a shortage of anywhere to put it.
+#
+# The size is written out rather than read from the panel, which does not exist
+# yet. Both orientations come to the same 4736 bytes on the Badger, and the
+# driver section below checks the panel really is that size.
+_BUF_SIZE = 296 * 128 // 8
+
+raw_working_buffer = bytearray(_BUF_SIZE)
+current_rotated_buffer = bytearray(_BUF_SIZE)
+next_rotated_buffer = bytearray(_BUF_SIZE)
+_early_rotate_scratch = bytearray(_BUF_SIZE)
+
+# Quick-back: a third page buffer holding the PREVIOUS page, so pressing up is
+# instant like pressing down already is. Costs one more screen buffer (~4.7KB)
+# but no extra rendering: on a page turn the page being left is already drawn,
+# so it becomes the previous page just by rotating which buffer is which (and
+# vice-versa when going back). Last of the five, so it is the one that loses if
+# the board cannot hold them all - back-navigation then renders on demand.
+QUICK_BACK = True
+try:
+    prev_rotated_buffer = bytearray(_BUF_SIZE) if QUICK_BACK else None
+    QUICK_BACK_OK = QUICK_BACK
+except MemoryError:
+    print("quick-back disabled: not enough memory for a third page buffer")
+    prev_rotated_buffer = None
+    QUICK_BACK_OK = False
+
 # Report missing data files once, before they fail somewhere less obvious. A
 # missing module raises ImportError and names itself, so those need no check
 # here; these do not. font5x8.bin only surfaces from inside a text() call, and
@@ -408,41 +444,24 @@ display = UC8151(
 display.enable_quick_updates(True)
 
 # --- BUFFERS ---
-raw_working_buffer = bytearray(display.width * display.height // 8)
-current_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
-next_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
+# Claimed at the very top of this file, before the hyphenation patterns, the
+# font and the driver - see the block near the imports. All that is left here
+# is to check the panel is the size they were sized for, and to hand the
+# rotation buffer to the driver.
+if display.width * display.height // 8 != _BUF_SIZE:
+    # A different panel: the early guesses are the wrong size, so pay the
+    # fragmentation cost rather than draw through buffers that do not fit.
+    print(f"panel is not {WIDTH}x{HEIGHT}; reallocating buffers")
+    _BUF_SIZE = display.width * display.height // 8
+    raw_working_buffer = bytearray(_BUF_SIZE)
+    current_rotated_buffer = bytearray(_BUF_SIZE)
+    next_rotated_buffer = bytearray(_BUF_SIZE)
+    _early_rotate_scratch = bytearray(_BUF_SIZE)
+    if prev_rotated_buffer is not None:
+        prev_rotated_buffer = bytearray(_BUF_SIZE)
 
-# The driver's rotation buffer, claimed before anything optional. Nothing
-# reaches a rotated panel without it, and it used to allocate itself on first
-# use - which put the one buffer the display cannot work without at the BACK of
-# the queue, behind the optional one below. A board a few KB short would boot,
-# open the picker and die mid-rotation:
-#
-#     File "uc8151_circuitpython.py", line 839, in _rotate_framebuffer
-#     MemoryError: memory allocation failed, allocating 4736 bytes
-#
-# Taken here, the shortage lands on quick-back instead, which is built to lose.
-display.ensure_scratch()
-
-# Quick-back: a third page buffer holding the PREVIOUS page, so pressing up is
-# instant like pressing down already is. Costs one more screen buffer (~4.7KB)
-# but no extra rendering: on a page turn the page being left is already drawn,
-# so it becomes the previous page just by rotating which buffer is which (and
-# vice-versa when going back). Allocated once at startup while the heap is
-# still unfragmented; if there isn't room, quick-back simply stays off and
-# back-navigation renders on demand as before.
-QUICK_BACK = True
-try:
-    if QUICK_BACK:
-        prev_rotated_buffer = bytearray(display.physical_width * display.physical_height // 8)
-        QUICK_BACK_OK = True
-    else:
-        prev_rotated_buffer = None
-        QUICK_BACK_OK = False
-except MemoryError:
-    print("quick-back disabled: not enough memory for a third page buffer")
-    prev_rotated_buffer = None
-    QUICK_BACK_OK = False
+display._rotate_scratch = _early_rotate_scratch
+_early_rotate_scratch = None
 
 prev_page_ready = False
 prev_page_offset = 0
@@ -456,13 +475,24 @@ _scratch_fb = adafruit_framebuf.FrameBuffer(
     raw_working_buffer, display.width, display.height, adafruit_framebuf.MHMSB
 )
 
-# What is left once every buffer is placed. Printed because a board that is
-# simply short - a stock firmware instead of the quickboot build, or a library
-# shipped as .py so its bytecode is compiled into RAM rather than loaded from
-# .mpy - fails much later and looks like something else entirely.
+# What is left once every buffer is placed - free memory AND the largest single
+# block, because those answer different questions and only the second one
+# explains a failure. The collector does not move objects, so free memory gets
+# split into pieces; a 4736-byte buffer fails when no single piece is that big,
+# however much is free in total. Seeing "70160 free" next to a failed 4736-byte
+# allocation is what tells you the problem is fragmentation, not shortage.
 gc.collect()
-print(f"boot: {gc.mem_free()} bytes free, quick-back "
-      f"{'on' if QUICK_BACK_OK else 'OFF (not enough memory)'}")
+_probe = 1024
+while _probe <= 65536:
+    try:
+        _b = bytearray(_probe)
+        del _b
+        _largest = _probe
+        _probe *= 2
+    except MemoryError:
+        break
+print(f"boot: {gc.mem_free()} bytes free, largest block >={_largest}, "
+      f"quick-back {'on' if QUICK_BACK_OK else 'OFF (no contiguous block)'}")
 
 
 class _ScratchFrame:

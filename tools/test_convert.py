@@ -303,12 +303,20 @@ def test_code_py_stays_out_of_the_readers_way():
     The budget is not a fixed truth, just a line that has to be argued with
     rather than crossed by accident. Raise it only with a reason.
     """
-    size = len(open(os.path.join(CPDIR, "code.py"), "rb").read())
-    budget = 70000
+    # Measured as compiled bytecode, not source bytes. Source is a poor proxy:
+    # the compiler drops comments, so moving 5KB of heavily-commented source
+    # out of this file once changed the board's free memory by nothing at all.
+    # CPython's bytecode is not CircuitPython's, but it tracks what actually
+    # costs RAM - code and constants - instead of what merely reads long.
+    import marshal
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    size = len(marshal.dumps(compile(src, "code.py", "exec")))
+    budget = 63000
     assert size <= budget, (
-        f"code.py is {size} bytes, over the {budget} budget by {size - budget}. "
-        "It is resident for the whole session - move rarely-run code into a "
-        "module imported at the point of use, as convert_ui.py does.")
+        f"code.py compiles to {size} bytes, over the {budget} budget by "
+        f"{size - budget}. It is resident for the whole session - move "
+        "rarely-run code into a module imported at the point of use, as "
+        "convert_ui.py does.")
 
     # and the conversion UI must not have crept back in
     src = open(os.path.join(CPDIR, "code.py")).read()
