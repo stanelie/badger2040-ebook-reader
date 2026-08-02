@@ -90,7 +90,7 @@ def clear_pending():
 
 
 PENDING_CONVERT = load_pending()
-_boot_mark("nvram: pending job")
+_boot_mark("nvram")
 
 # --- SCREEN BUFFERS, CLAIMED FIRST ---
 # Every screen buffer is taken here, before the hyphenation patterns, the font
@@ -136,7 +136,7 @@ except MemoryError:
     print("quick-back disabled: not enough memory for a third page buffer")
     prev_rotated_buffer = None
     QUICK_BACK_OK = False
-_boot_mark("screen buffers")
+_boot_mark("buffers")
 
 # The guard that used to sit here warned when adafruit_framebuf.py was at the
 # drive root, shadowing lib/'s .mpy and costing ~30KB of RAM. It cannot happen
@@ -171,7 +171,7 @@ try:
 except Exception as _e:
     print(f"hyphenator unavailable: {_e}")
     _HYPHEN_OK = False
-_boot_mark("hyphenation patterns")
+_boot_mark("hyphen patterns")
 
 # Proportional reading fonts. The B button cycles through whichever of these
 # are present on the device. The layout engine measures line fit in pixels via
@@ -577,7 +577,7 @@ display = UC8151(
 )
 
 display.enable_quick_updates(True)
-_boot_mark("display driver")
+_boot_mark("display")
 
 # --- BUFFERS ---
 # Claimed at the very top of this file, before the hyphenation patterns, the
@@ -1938,7 +1938,7 @@ if font_index != 0:
 
 # Render current page
 render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
-_boot_mark("  page rendered (layout + glyphs + rotate)")
+_boot_mark("  page laid out + drawn")
 
 # Full refresh for first display update (only if file_picker wasn't shown)
 if first_display_update:
@@ -1949,14 +1949,14 @@ if first_display_update:
 else:
     update_display_fast(current_rotated_buffer)
 
-_boot_mark("  panel refreshed")
+_boot_mark("  panel")
 
 # Pre-render the neighbouring pages so the first press either way is instant
 prerender_next()
-_boot_mark("  next page pre-rendered")
+_boot_mark("  next pre-rendered")
 prerender_prev()
 
-_boot_mark("neighbour pages")
+_boot_mark("prev pre-rendered")
 
 # Save initial state
 force_save_state()
