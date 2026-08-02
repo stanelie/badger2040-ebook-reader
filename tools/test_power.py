@@ -537,6 +537,53 @@ def test_cover_sleep_screen_is_off_by_default():
             sys.modules["__main__"] = saved
     print("  [ok] sleep screen shows title and progress; cover stays off")
 
+def test_opening_the_picker_resets_the_sleep_timer():
+    """Entering the picker is activity, and its first draw is not idling.
+
+    file_picker inherited whatever was left of the reading timeout, and its
+    first draw is a full refresh costing a second or two on top. With a short
+    timeout the picker slept almost as soon as it appeared - pressing A after
+    nine idle seconds left it one.
+
+    handle_menu_button has the same problem from the other end: it blocks while
+    A is held, up to ten seconds for a factory reset, and the press was only
+    counted where it began.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+
+    def body_of(name):
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node, ast.get_source_segment(src, node)
+        raise AssertionError(f"{name} not found")
+
+    node, picker = body_of("file_picker")
+    stamp = picker.find("last_activity = time.monotonic()")
+    loop = picker.find("while True:")
+    assert stamp != -1, (
+        "file_picker never records that opening it was activity, so it "
+        "inherits the reading timeout")
+    assert stamp < loop, (
+        "the picker only refreshes the timer inside its loop, so the first "
+        "draw - a full refresh - counts as idle time")
+    # and it has to be declared global, or it writes a local and changes nothing
+    assert any(isinstance(n, ast.Global) and "last_activity" in n.names
+               for n in ast.walk(node)), (
+        "file_picker assigns last_activity without declaring it global, so the "
+        "reader's timer is untouched")
+
+    node, menu = body_of("handle_menu_button")
+    held = menu.find("while button_pressed")
+    stamp = menu.find("last_activity = time.monotonic()")
+    assert stamp != -1 and stamp > held, (
+        "handle_menu_button does not refresh the timer after waiting for the "
+        "button to come up; a long press counts against the timeout it is "
+        "held during")
+    assert any(isinstance(n, ast.Global) and "last_activity" in n.names
+               for n in ast.walk(node)), (
+        "handle_menu_button assigns last_activity without declaring it global")
+    print("  [ok] opening the picker and releasing A both reset the timer")
+
 def main():
     print("sleep / inactivity behaviour:")
     test_stays_awake_before_timeout()
@@ -545,6 +592,7 @@ def main():
     test_activity_defers_sleep()
     test_save_skipped_without_a_book()
     test_picker_loop_checks_inactivity()
+    test_opening_the_picker_resets_the_sleep_timer()
     test_sleep_shows_the_cover_or_leaves_the_page()
     test_sleep_frame_is_exactly_one_screen()
     test_cover_fits_the_panel_and_dithers()

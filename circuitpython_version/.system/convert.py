@@ -43,6 +43,7 @@ print("convert.py starting")
 
 WIDTH, HEIGHT = 296, 128
 BUF_SIZE = WIDTH * HEIGHT // 8
+SPEED, NO_FLICKER = 4, True
 
 # The slot code.py writes the queued book into.
 NVM_O_PENDING = 3902
@@ -134,8 +135,8 @@ display = UC8151(
     rotation=270,
     use_framebuf_font=True,
     font_path="/.fonts/font5x8.bin",
-    speed=4,
-    no_flickering=True,
+    speed=SPEED,
+    no_flickering=NO_FLICKER,
     full_update_period=0,
 )
 display.enable_quick_updates(True)
@@ -195,7 +196,16 @@ def draw(note=""):
     _state["partials"] = 0
     old_rot = display.rotation
     display.rotation = 0
-    display.update(fb=rotated)
+    if not _state["drawn"]:
+        # First update after the restart. The driver has just started and has
+        # no idea what is on the panel, while the quick waveform only moves
+        # pixels it believes have changed - so whatever the reader left up
+        # shows through the progress screen. Drive every pixel once.
+        display.set_speed(0, no_flickering=False)
+        display.update(fb=rotated)
+        display.set_speed(SPEED, no_flickering=NO_FLICKER)
+    else:
+        display.update(fb=rotated)
     display.rotation = old_rot
     _state["drawn"] = True
 
@@ -239,14 +249,16 @@ else:
         draw("Conversion failed")
         time.sleep(4)
     if txt:
-        # Turn the cover into a sleep screen now, while this program still has
-        # the board to itself. The reader could not: decoding needs the scaled
-        # image held whole, and it has neither the free memory nor a heap in
-        # one piece by the time it goes to sleep.
-        draw("Making sleep screen...")
+        # Only worth doing if the sleep screen will actually show it. Decoding
+        # has to happen here rather than in the reader - the scaled image must
+        # be held whole, and the reader has neither the free memory nor a heap
+        # in one piece by the time it sleeps - but there is no point paying for
+        # it when the reader is set to show the title and progress instead.
         try:
             import coverimg
-            coverimg.render_for_book(txt)
+            if coverimg.USE_COVER_SLEEP_SCREEN:
+                draw("Making sleep screen...")
+                coverimg.render_for_book(txt)
         except Exception as e:
             print(f"no sleep screen: {e}")   # the reader keeps the last page
         try:

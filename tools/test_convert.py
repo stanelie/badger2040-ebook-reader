@@ -331,6 +331,10 @@ def test_code_py_stays_out_of_the_readers_way():
     # point of it - and it buys back far more than it costs: a conversion boot
     # now skips the 31.5KB pattern blob, the font and three screen buffers.
     #
+    # 68000 -> 68500: boot timing prints, added to find where startup time goes.
+    # Diagnostic and temporary - BOOT_TIMING switches them off, and when the
+    # question is answered they should come out and this should come back down.
+    #
     # 67500 -> 68000: the interface font moved from vga2_8x16 to a file-backed
     # oldmono.pf. This budget counts only code.py's own bytecode, so it sees
     # 277 bytes added and none of the 17.8KB module deleted or the ~4KB of
@@ -352,7 +356,7 @@ def test_code_py_stays_out_of_the_readers_way():
     # well below any of these numbers. It was not done here because the gain
     # needed was 189 bytes and the picker is the part of this codebase with the
     # most recent history of subtle breakage.
-    budget = 68000
+    budget = 68500
     assert size <= budget, (
         f"code.py compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "
@@ -732,6 +736,9 @@ def test_progress_forces_a_full_refresh_periodically():
         raw_fb = None
         rotation = 270
 
+        def set_speed(self, speed, no_flickering=False):
+            calls.setdefault("speeds", []).append((speed, no_flickering))
+
         def text(self, *a, **k):
             pass
 
@@ -749,6 +756,7 @@ def test_progress_forces_a_full_refresh_periodically():
         "WIDTH": 296, "HEIGHT": 128, "BAR": bar,
         "BAND_Y": _const(src, "BAND_Y"), "BAND_H": _const(src, "BAND_H"),
         "STEP": _const(src, "STEP"), "FULL_EVERY": every,
+        "SPEED": _const(src, "SPEED"), "NO_FLICKER": _const(src, "NO_FLICKER"),
         "NOTES": _const(src, "NOTES"),
         "_state": dict(_const(src, "_state")),
         "display": _Display(), "fb": _FB(), "working": bytearray(4736),
@@ -762,6 +770,18 @@ def test_progress_forces_a_full_refresh_periodically():
     ns["progress"]("start", 0, total, "Book.epub")
     for i in range(total + 1):
         ns["progress"]("chapter", i, total, "Book.epub")
+
+    # The first update after the restart has to drive every pixel. The driver
+    # has just started and does not know what is on the panel, and the quick
+    # waveform only moves pixels it believes changed - so the screen the reader
+    # left behind shows through the progress display.
+    speeds = calls.get("speeds", [])
+    assert speeds and speeds[0] == (0, False), (
+        f"the converter's first draw is not a full flicker refresh ({speeds[:2]}); "
+        "the previous screen will show through it")
+    assert (0, False) not in speeds[1:], (
+        "every draw is a full flicker refresh, which is far slower than it "
+        "needs to be")
 
     assert calls["full"] >= 2, (
         f"only {calls['full']} full refreshes across a whole conversion; the "

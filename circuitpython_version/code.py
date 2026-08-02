@@ -3,7 +3,21 @@ CircuitPython E-book Reader for Badger 2040
 Fully on-the-fly pagination - no filesystem state storage
 State saved to NVRAM only
 """
+import time
 import sys
+
+# Where the time goes between power-on and the first page. Set False to silence
+# it. What this cannot see is compiling code.py itself, which happens before any
+# of it runs - if the total here is much less than the wait, that is where the
+# rest went.
+BOOT_TIMING = True
+_boot_t0 = time.monotonic()
+
+
+def _boot_mark(label):
+    if BOOT_TIMING:
+        print("boot %6.2fs  %s" % (time.monotonic() - _boot_t0, label))
+
 
 # Everything except this file and boot.py lives in /.system, and the fonts in
 # /.fonts, so a mounted CIRCUITPY shows books rather than machinery. Dot-folders
@@ -19,7 +33,6 @@ for _p in ("/.system", "/lib"):
 import board
 import displayio
 import digitalio
-import time
 import os
 import struct
 import gc
@@ -77,6 +90,7 @@ def clear_pending():
 
 
 PENDING_CONVERT = load_pending()
+_boot_mark("nvram: pending job")
 
 # --- SCREEN BUFFERS, CLAIMED FIRST ---
 # Every screen buffer is taken here, before the hyphenation patterns, the font
@@ -122,6 +136,7 @@ except MemoryError:
     print("quick-back disabled: not enough memory for a third page buffer")
     prev_rotated_buffer = None
     QUICK_BACK_OK = False
+_boot_mark("screen buffers")
 
 # The guard that used to sit here warned when adafruit_framebuf.py was at the
 # drive root, shadowing lib/'s .mpy and costing ~30KB of RAM. It cannot happen
@@ -156,11 +171,13 @@ try:
 except Exception as _e:
     print(f"hyphenator unavailable: {_e}")
     _HYPHEN_OK = False
+_boot_mark("hyphenation patterns")
 
 # Proportional reading fonts. The B button cycles through whichever of these
 # are present on the device. The layout engine measures line fit in pixels via
 # the active FONT. The picker and status bars still use the built-in monospace.
 import propfont
+_boot_mark("imports")
 
 FONT_FILES = [
     (FONT_DIR + "/oldmono.pf", "Mono 8x16"),   # the original reader font
@@ -215,10 +232,10 @@ try:
     _ui_font = propfont.PropFont(UI_FONT, file_backed=True)
 except Exception as _e:
     print(f"interface font unavailable, falling back to font5x8: {_e}")
+_boot_mark("fonts")
 
 LED_DUTY_CYCLE = 40
-# Short for testing. 300 is the sensible value for actually reading.
-INACTIVITY_TIMEOUT = 10
+INACTIVITY_TIMEOUT = 300
 
 # ---------------- LED -----------------
 led = pwmio.PWMOut(board.USER_LED, frequency=1000, duty_cycle=0)
@@ -560,6 +577,7 @@ display = UC8151(
 )
 
 display.enable_quick_updates(True)
+_boot_mark("display driver")
 
 # --- BUFFERS ---
 # Claimed at the very top of this file, before the hyphenation patterns, the
@@ -1360,6 +1378,11 @@ def file_picker():
     """Show the list of books and return the chosen path, or None if nothing
     was chosen (no books, or the picker timed out and went to sleep)."""
     global first_display_update, last_activity
+    # Opening the picker is activity. Without this it inherits whatever was
+    # left of the reading timeout, and its first draw is a full refresh taking
+    # a second or two on top - so on a short timeout it can sleep almost as
+    # soon as it appears.
+    last_activity = time.monotonic()
     books = list_books()
 
     if not books:
@@ -1724,6 +1747,7 @@ def open_picker():
 def handle_menu_button():
     """A button: short press opens the picker, long press forces a full
     refresh, holding for 10s triggers a factory reset."""
+    global last_activity
     press_start = time.monotonic()
     reset_warning_shown = False
 
@@ -1736,6 +1760,10 @@ def handle_menu_button():
             reset_warning_shown = True
         time.sleep(0.05)
     press_duration = time.monotonic() - press_start
+    # Activity ended when the button came up, not when it went down. Holding A
+    # for a full refresh, or through the three seconds before the reset
+    # warning, would otherwise count against the timeout it was held during.
+    last_activity = time.monotonic()
 
     if press_duration >= 10.0:
         led_on()
@@ -1897,6 +1925,7 @@ if not text_file:
 
 # Clear history for fresh start
 history_clear()
+_boot_mark("book state")
 
 # Apply the saved font choice
 font_index = load_font_index() % len(AVAILABLE_FONTS)
@@ -1919,9 +1948,13 @@ if first_display_update:
 else:
     update_display_fast(current_rotated_buffer)
 
+_boot_mark("first page on screen")
+
 # Pre-render the neighbouring pages so the first press either way is instant
 prerender_next()
 prerender_prev()
+
+_boot_mark("neighbour pages")
 
 # Save initial state
 force_save_state()

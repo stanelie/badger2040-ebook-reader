@@ -51,6 +51,11 @@ LAST_COUNTS = (0, 0)
 # in /books - the reason only a book or two fits on the board - and the .txt
 # plus the cover replace it entirely. Set False to keep the source.
 DELETE_SOURCE_AFTER_CONVERT = True
+# Pull the cover image out of the EPUB. Off: the only thing that wanted it was
+# the sleep screen, and that is not showing covers - see USE_COVER_SLEEP_SCREEN
+# in coverimg.py. It costs real time on this board, streaming and inflating a
+# ~50KB image, and the file then sits in /books unread.
+EXTRACT_COVER = False
 STATUS_HISTORY = []
 
 
@@ -675,8 +680,9 @@ def run_extraction(epub_path, progress=None):
 
             # Cover next: if the text conversion runs into trouble later, at
             # least the cover is already saved.
-            _notify(progress, "cover", 0, 0, base_name)
-            extract_cover(uzf, base_path)
+            if EXTRACT_COVER:
+                _notify(progress, "cover", 0, 0, base_name)
+                extract_cover(uzf, base_path)
             try:
                 import gc
                 gc.collect()        # give back the manifest parsing scratch

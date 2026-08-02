@@ -605,6 +605,7 @@ def main():
     test_output_paginates_in_the_reader()
     test_empty_output_fails_and_leaves_a_log()
     test_source_epub_removed_only_after_a_clean_conversion()
+    test_cover_extraction_is_off_by_default()
     test_writing_is_refused_while_the_usb_host_holds_the_drive()
     print("\nALL EPUB CHECKS PASSED")
     return 0
@@ -826,6 +827,48 @@ def test_source_epub_removed_only_after_a_clean_conversion():
          epub_xtract.log_status) = real
         epub_xtract.close_log()
     print("  [ok] the .epub goes only after a clean conversion")
+
+def test_cover_extraction_is_off_by_default():
+    """Nothing reads the cover, so nothing should spend time producing it.
+
+    The sleep screen was the only consumer and it shows the title and progress
+    instead. Pulling the image out means streaming and inflating ~50KB on a
+    board where that is measured in seconds, and the file then sits unread.
+    """
+    assert epub_xtract.EXTRACT_COVER is False, (
+        "cover extraction is on again; nothing uses the file and it costs "
+        "real time on this board")
+
+    tmp = tempfile.mkdtemp()
+    os.makedirs(os.path.join(tmp, "books"))
+    src = os.path.join(tmp, "books", "Book.epub")
+    build_epub(src, [("ch1.xhtml", "One")], cover="cover.jpg")
+
+    real = (epub_xtract._writable, epub_xtract.TARGET_DIR,
+            epub_xtract.DELETE_SOURCE_AFTER_CONVERT, epub_xtract.VERBOSE,
+            epub_xtract.EXTRACT_COVER)
+    epub_xtract._writable = lambda: True
+    epub_xtract.VERBOSE = False
+    epub_xtract.DELETE_SOURCE_AFTER_CONVERT = False
+    epub_xtract.TARGET_DIR = tmp.lstrip("/") + "/books"
+    try:
+        epub_xtract.convert_book(src, keep_display=False)
+        produced = os.listdir(os.path.join(tmp, "books"))
+        assert not any(".cover." in f for f in produced), (
+            f"a cover was written despite EXTRACT_COVER being off: {produced}")
+
+        # and it still works when asked for, so the code has not rotted
+        epub_xtract.EXTRACT_COVER = True
+        epub_xtract.convert_book(src, keep_display=False)
+        produced = os.listdir(os.path.join(tmp, "books"))
+        assert any(".cover." in f for f in produced), (
+            f"EXTRACT_COVER=True produced no cover: {produced}")
+    finally:
+        (epub_xtract._writable, epub_xtract.TARGET_DIR,
+         epub_xtract.DELETE_SOURCE_AFTER_CONVERT, epub_xtract.VERBOSE,
+         epub_xtract.EXTRACT_COVER) = real
+        epub_xtract.close_log()
+    print("  [ok] no cover is extracted, but the code still can")
 
 if __name__ == "__main__":
     sys.exit(main())
