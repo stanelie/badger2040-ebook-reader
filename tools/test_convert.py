@@ -331,9 +331,10 @@ def test_code_py_stays_out_of_the_readers_way():
     # point of it - and it buys back far more than it costs: a conversion boot
     # now skips the 31.5KB pattern blob, the font and three screen buffers.
     #
-    # 68000 -> 68500: boot timing prints, added to find where startup time goes.
-    # Diagnostic and temporary - BOOT_TIMING switches them off, and when the
-    # question is answered they should come out and this should come back down.
+    # 68000 -> 68600: boot timing prints, added to find where startup time
+    # goes, plus the constant that answered them. Diagnostic and temporary -
+    # BOOT_TIMING switches the prints off, and when the question is settled
+    # they should come out and this should come back down.
     #
     # 67500 -> 68000: the interface font moved from vga2_8x16 to a file-backed
     # oldmono.pf. This budget counts only code.py's own bytecode, so it sees
@@ -356,7 +357,7 @@ def test_code_py_stays_out_of_the_readers_way():
     # well below any of these numbers. It was not done here because the gain
     # needed was 189 bytes and the picker is the part of this codebase with the
     # most recent history of subtle breakage.
-    budget = 68500
+    budget = 68600
     assert size <= budget, (
         f"code.py compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "
@@ -960,6 +961,48 @@ def test_tethered_conversion_is_refused_before_restarting():
         "convert it")
     print("  [ok] tethered: queued and explained, no pointless restart")
 
+def test_first_refresh_is_not_the_slowest_waveform():
+    """Boot is dominated by one e-ink refresh, not by rendering.
+
+    Measured on the board: 1.19s to load state, 0.96s to lay out and draw the
+    page, then 3.45s for the panel. That refresh has to drive every pixel - the
+    driver has just started and cannot know what is on the screen - but speed 0
+    is the panel's own factory table, the most thorough and the slowest. The
+    computed waveforms halve their period per step and still drive every pixel
+    charge-neutrally below speed 4.
+
+    The full refresh a long press on A asks for is deliberately left at 0: the
+    user is waiting for that one on purpose.
+    """
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    speed = _const(src, "FIRST_REFRESH_SPEED")
+    assert 1 <= speed <= 3, (
+        f"FIRST_REFRESH_SPEED is {speed}; above 3 the waveform stops being "
+        "charge-neutral and will not clear the previous image, and 0 is the "
+        "slow factory table this exists to avoid")
+
+    # every first-display refresh goes through the constant
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call)
+                and getattr(node.func, "attr", None) == "set_speed"):
+            continue
+        if not node.args:
+            continue
+        arg = node.args[0]
+        flicker = any(k.arg == "no_flickering"
+                      and isinstance(k.value, ast.Constant)
+                      and k.value.value is False
+                      for k in node.keywords)
+        if not flicker:
+            continue
+        # a literal 0 is only allowed where the user asked for it and waits
+        if isinstance(arg, ast.Constant) and arg.value == 0:
+            around = src.splitlines()[max(0, node.lineno - 6):node.lineno]
+            assert any("asked for" in l for l in around), (
+                f"line {node.lineno} does a full-flicker refresh at speed 0 "
+                "without saying why; on the boot path that is 3.45 seconds")
+    print(f"  [ok] first refresh at speed {speed}, not the factory table")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -977,5 +1020,6 @@ if __name__ == "__main__":
     test_progress_forces_a_full_refresh_periodically()
     test_a_conversion_refused_for_usb_stays_queued()
     test_tethered_conversion_is_refused_before_restarting()
+    test_first_refresh_is_not_the_slowest_waveform()
     test_no_module_level_name_is_used_before_it_exists()
     print("\nALL CONVERT CHECKS PASSED")

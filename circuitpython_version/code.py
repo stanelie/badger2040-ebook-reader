@@ -546,6 +546,16 @@ def history_clear():
 # ---------------- DISPLAY -----------------
 spi = board.SPI()
 
+# Waveform for the first refresh after power-on, which has to drive every pixel
+# because the driver has just started and cannot know what is on the panel.
+#
+# Speed 0 is the panel's own factory table - the most thorough clear there is,
+# and measured at 3.45 of a 5.6 second boot, where laying out and drawing the
+# page took under a second. Speeds 1-6 use a computed waveform whose period
+# halves with each step, so 2 still drives every pixel charge-neutrally in a
+# quarter of the time. Set it to 0 if a previous image shows through.
+FIRST_REFRESH_SPEED = 2
+
 ORIGINAL_SPEED = 4
 ORIGINAL_NO_FLICKERING = True
 display = UC8151(
@@ -1391,7 +1401,7 @@ def file_picker():
 
         # Full refresh if first display
         if first_display_update:
-            display.set_speed(0, no_flickering=False)
+            display.set_speed(FIRST_REFRESH_SPEED, no_flickering=False)
             display.update()
             display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
             first_display_update = False
@@ -1422,7 +1432,7 @@ def file_picker():
             old_rot = display.rotation
             display.rotation = 0
             if first_display_update:
-                display.set_speed(0, no_flickering=False)
+                display.set_speed(FIRST_REFRESH_SPEED, no_flickering=False)
                 display.update(fb=screen)
                 display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
                 first_display_update = False
@@ -1772,7 +1782,10 @@ def handle_menu_button():
         import factory
         factory.reset()  # does not return
     elif press_duration > 0.7:
-        # Full refresh (clears e-ink ghosting)
+        # Full refresh (clears e-ink ghosting). Speed 0, the panel's own
+        # table, because this one was asked for: the user held the button
+        # precisely to get the most thorough clear available, and is waiting
+        # for it rather than for the reader to start.
         if reset_warning_shown:
             render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
         display.set_speed(0, no_flickering=False)
@@ -1913,7 +1926,7 @@ if not text_file:
 
         # Full refresh if first display
         if first_display_update:
-            display.set_speed(0, no_flickering=False)
+            display.set_speed(FIRST_REFRESH_SPEED, no_flickering=False)
             display.update()
             display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
             first_display_update = False
@@ -1942,7 +1955,7 @@ _boot_mark("  page laid out + drawn")
 
 # Full refresh for first display update (only if file_picker wasn't shown)
 if first_display_update:
-    display.set_speed(0, no_flickering=False)
+    display.set_speed(FIRST_REFRESH_SPEED, no_flickering=False)
     update_display_fast(current_rotated_buffer)
     display.set_speed(ORIGINAL_SPEED, no_flickering=ORIGINAL_NO_FLICKERING)
     first_display_update = False
