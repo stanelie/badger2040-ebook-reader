@@ -109,12 +109,27 @@ def pack(get_pixel, src_w, src_h, out=None, width=WIDTH, height=HEIGHT):
     return out
 
 
-def show_sleep_cover():
-    """Put the current book's cover on the panel. True if there was one.
+def _sleep_message(reader):
+    """Say so on the panel when there is no cover to show.
 
-    Reads a frame this module prepared - already 1-bit, already the right size,
-    already in the framebuffer's own layout - so it allocates nothing and
-    decodes nothing at sleep time.
+    Leaving the last page up was the first idea, and it reads as a board that
+    has not gone to sleep yet - there is no way to tell the two apart by
+    looking, which is the one thing this screen is for.
+    """
+    try:
+        reader.show_message(("Sleeping...", 110, 30),
+                            ("press any key to wake", 60, 90))
+    except Exception as e:
+        print("[COVER] could not draw the sleep message: %s" % e)
+    return False
+
+
+def show_sleep_screen():
+    """Draw the sleep screen: the book's cover, or a message saying it slept.
+
+    True if a cover was shown. The cover frame was prepared by this module -
+    already 1-bit, already the right size, already in the framebuffer's own
+    layout - so this allocates nothing and decodes nothing at sleep time.
 
     Reaches the reader through __main__ the way convert_ui does, rather than
     being handed its buffers: it needs several of them and it is only ever
@@ -125,21 +140,21 @@ def show_sleep_cover():
     except ImportError:
         import sys
         reader = sys.modules.get("__main__")
+    if reader is None:
+        return False
     book = getattr(reader, "text_file", "")
-    if not reader or not book:
-        return False
     buf = getattr(reader, "raw_working_buffer", None)
-    if buf is None:
-        return False
+    if not book or buf is None:
+        return _sleep_message(reader)
     try:
         with open(sleep_path_for(book), "rb") as f:
             got = f.readinto(buf)
     except Exception:
-        return False                       # no cover for this book
+        return _sleep_message(reader)      # no cover for this book
     if got != len(buf):
         print("[COVER] sleep frame is %d bytes, expected %d - ignoring"
               % (got, len(buf)))
-        return False
+        return _sleep_message(reader)
     display = reader.display
     # A full flicker-free refresh: this image stays on the panel with the power
     # off, possibly for weeks, so drive every pixel properly rather than leave

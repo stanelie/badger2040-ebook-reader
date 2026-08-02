@@ -1756,13 +1756,13 @@ def enter_sleep():
     """Save the reading position, show the sleep screen and cut the display
     rail. Waking runs code.py from the top again."""
     force_save_state()  # Critical: save before power down
-    # The cover, if this book has one prepared. In coverimg rather than here
-    # because it runs once per sleep and code.py is resident all session; a
-    # failure just leaves the last page up, which is a perfectly good thing for
-    # an e-ink screen to show while it is asleep.
+    # The cover if this book has one prepared, otherwise a message saying it
+    # slept - without which a board that has gone to sleep looks exactly like
+    # one that has not. In coverimg rather than here because it runs once per
+    # sleep and code.py is resident all session.
     try:
         import coverimg
-        coverimg.show_sleep_cover()
+        coverimg.show_sleep_screen()
     except Exception as e:
         print(f"no sleep screen: {e}")
     board.ENABLE_DIO.value = False

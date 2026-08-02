@@ -147,14 +147,15 @@ def test_sleep_shows_the_cover_or_leaves_the_page():
     on the board - a JPEG needs its scaled bitmap held whole and in one piece.
     At sleep it is a file read into a buffer that already exists.
 
-    A book with no cover, or a frame of the wrong size, must leave the last
-    page on the panel rather than blank it.
+    A book with no cover, or a frame of the wrong size, must say it has gone to
+    sleep instead. Leaving the last page up was tried first and is unreadable
+    as a state: a sleeping board looks exactly like one that is still awake.
     """
     import tempfile
     sys.path.insert(0, CPDIR)
     import coverimg
 
-    calls = {"refreshed": 0, "speeds": []}
+    calls = {"refreshed": 0, "speeds": [], "messages": []}
     buf = bytearray(4736)
 
     class _Display:
@@ -177,31 +178,46 @@ def test_sleep_shows_the_cover_or_leaves_the_page():
         def update_display_fast(b, blocking=True):
             calls["refreshed"] += 1
 
+        @staticmethod
+        def show_message(*items, **kw):
+            calls["messages"].append(" ".join(t for t, _x, _y in items))
+
     reader = _Reader()
     saved = sys.modules.get("__main__")
     sys.modules["__main__"] = reader
     try:
         tmp = tempfile.mkdtemp()
-        assert coverimg.show_sleep_cover() is False, (
+        assert coverimg.show_sleep_screen() is False, (
             "claimed a cover with no book open")
+        assert calls["messages"], "said nothing at all with no book open"
 
         book = os.path.join(tmp, "Sway.txt")
         open(book, "wb").write(b"text")
         reader.text_file = book
-        assert coverimg.show_sleep_cover() is False, (
+        calls["messages"] = []
+        assert coverimg.show_sleep_screen() is False, (
             "claimed a cover that does not exist")
-        assert calls["refreshed"] == 0, "refreshed the panel with nothing to show"
+        assert calls["refreshed"] == 0, "pushed a frame with nothing to show"
+        assert any("Sleep" in m for m in calls["messages"]), (
+            "a book with no cover left the page up; a sleeping board then "
+            "looks exactly like one that is still awake")
 
         frame = os.path.join(tmp, "Sway.sleep.bin")
         open(frame, "wb").write(b"\xff" * 100)
-        assert coverimg.show_sleep_cover() is False, (
+        calls["messages"] = []
+        assert coverimg.show_sleep_screen() is False, (
             "accepted a truncated sleep frame")
         assert calls["refreshed"] == 0, "pushed a truncated frame to the panel"
+        assert any("Sleep" in m for m in calls["messages"]), (
+            "a bad frame showed nothing at all")
 
         payload = bytes(range(256)) * (4736 // 256) + b"\x00" * (4736 % 256)
         open(frame, "wb").write(payload)
-        assert coverimg.show_sleep_cover() is True, (
+        calls["messages"] = []
+        assert coverimg.show_sleep_screen() is True, (
             "did not show a valid sleep frame")
+        assert not calls["messages"], (
+            "drew the sleep message over a cover that was shown")
         assert calls["refreshed"] == 1, "did not refresh the panel"
         assert bytes(buf) == payload, "the frame on screen is not the one on disk"
 
@@ -223,10 +239,10 @@ def test_sleep_shows_the_cover_or_leaves_the_page():
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "enter_sleep":
             body = ast.get_source_segment(src, node)
-    assert "coverimg" in body and "show_sleep_cover" in body, (
-        "enter_sleep no longer shows the cover")
-    assert "def show_sleep_cover" not in src, (
-        "show_sleep_cover is back in code.py; it runs once per sleep and that "
+    assert "coverimg" in body and "show_sleep_screen" in body, (
+        "enter_sleep no longer draws a sleep screen")
+    assert "def show_sleep_screen" not in src, (
+        "show_sleep_screen is back in code.py; it runs once per sleep and that "
         "file is resident for the whole session")
     print("  [ok] sleep shows a prepared cover, or leaves the page up")
 
@@ -249,7 +265,7 @@ def test_sleep_frame_is_exactly_one_screen():
     # this module now, so check they go through the one helper rather than
     # spelling the suffix out twice.
     ui = open(os.path.join(CPDIR, "coverimg.py")).read()
-    for fn in ("show_sleep_cover", "render_for_book"):
+    for fn in ("show_sleep_screen", "render_for_book"):
         for node in ast.parse(ui).body:
             if isinstance(node, ast.FunctionDef) and node.name == fn:
                 body = ast.get_source_segment(ui, node)

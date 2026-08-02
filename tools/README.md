@@ -114,7 +114,8 @@ results to the fast path.
 ### test_power.py additions
 
 Covers the sleep screen: that a prepared frame is shown, that a missing or
-wrong-sized one leaves the last page up rather than blanking the panel, and
+wrong-sized one falls back to the "Sleeping..." message rather than leaving the
+page up - a sleeping board has to be distinguishable from an awake one - and
 that it is drawn with a full flicker refresh - the image sits there with the
 power off, so a quick update's ghosting would stay for as long as the board
 sleeps. Also checks the cover fitting: letterboxed whole rather than cropped,
