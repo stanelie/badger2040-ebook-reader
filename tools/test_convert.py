@@ -525,6 +525,91 @@ def test_failed_conversion_does_not_become_the_active_book():
             "the failure branch also records the book")
     print("  [ok] a failed conversion is not made the active book")
 
+def test_convert_py_writes_nvram_the_reader_can_read():
+    """convert.py records the new book without importing code.py.
+
+    It cannot import it: not loading code.py is the entire reason convert.py
+    exists. A conversion boot that still ran code.py reached the archive with
+    46272 bytes free and nothing over 1KB contiguous, and failed on a 525-byte
+    chapter. So the NVRAM layout is written out in both files, and the two have
+    to agree - a silent disagreement would convert the book and then open the
+    wrong one, or none.
+    """
+    import struct
+    src = open(os.path.join(CPDIR, "convert.py")).read()
+    code = open(os.path.join(CPDIR, "code.py")).read()
+
+    nvm = bytearray(4096)
+    fake = type("MC", (), {})()
+    fake.nvm = nvm
+    writer = {"microcontroller": fake, "struct": struct}
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "set_active_book":
+            exec(ast.get_source_segment(src, node), writer)
+    assert "set_active_book" in writer, "convert.py cannot record the new book"
+
+    reader = {"NVM": nvm, "struct": struct, "print": lambda *a, **k: None}
+    for node in ast.parse(code).body:
+        if isinstance(node, ast.Assign) and getattr(
+                node.targets[0], "id", "").startswith(
+                    ("NVM_O_", "ENTRY_", "MAX_BOOKS", "NVRAM_MAGIC")):
+            try:
+                reader[node.targets[0].id] = ast.literal_eval(
+                    ast.get_source_segment(code, node.value))
+            except Exception:
+                pass
+        elif isinstance(node, ast.FunctionDef) and node.name in (
+                "_get_entry_base", "_read_entry", "_find_book_index",
+                "state_load_last_book", "state_load_book"):
+            exec(ast.get_source_segment(code, node), reader)
+
+    nvm[0:4] = struct.pack("<I", reader["NVRAM_MAGIC"])
+    nvm[4:6] = struct.pack("<H", 0)
+    nvm[6:8] = struct.pack("<H", 0)
+
+    # Poison every entry slot with a position from some earlier book. Starting
+    # from zeroed NVRAM would let "never writes the offset" pass unnoticed, and
+    # the reader would then open a brand new book part-way through it.
+    for i in range(reader["MAX_BOOKS"]):
+        base = 8 + i * reader["ENTRY_SIZE"]
+        nvm[base:base + 4] = struct.pack("<I", 123456)
+        nvm[base + 4:base + 6] = struct.pack("<H", 5)
+        nvm[base + 6:base + 11] = b"stale"
+
+    for path in ("/books/The Last Town.txt", "/books/Alice.txt",
+                 "/books/The Last Town.txt"):
+        writer["set_active_book"](path)
+        assert reader["state_load_last_book"]() == path, (
+            f"convert.py recorded {path!r} but code.py opens "
+            f"{reader['state_load_last_book']()!r}")
+        # state_load_book returns (0, b"") when it fails internally, which is
+        # the same answer as success - so prove the lookup actually found the
+        # entry before trusting what it says about the position.
+        assert reader["_find_book_index"](path) >= 0, (
+            f"code.py cannot find {path!r} in the entry convert.py wrote")
+        offset, remainder = reader["state_load_book"](path)
+        assert offset == 0 and remainder == b"", (
+            "a freshly converted book must open at the start, not at a "
+            "position left over from a previous book in that slot")
+
+    count = struct.unpack("<H", bytes(nvm[4:6]))[0]
+    assert count == 2, (
+        f"converting the same book twice made {count} entries; it should "
+        "reuse the one already there")
+
+    # and the queued-job slot must be the same one on both sides
+    def const(text, name):
+        for node in ast.parse(text).body:
+            if isinstance(node, ast.Assign) and getattr(
+                    node.targets[0], "id", None) == name:
+                return ast.literal_eval(ast.get_source_segment(text, node.value))
+        raise AssertionError(f"{name} missing")
+    for name in ("NVM_O_PENDING", "PENDING_MAGIC", "PENDING_MAX"):
+        assert const(src, name) == const(code, name), (
+            f"{name} differs between convert.py and code.py, so the queued "
+            "book would not be found")
+    print("  [ok] convert.py and code.py agree on the NVRAM layout")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -536,5 +621,6 @@ if __name__ == "__main__":
     test_conversion_boot_skips_the_readers_allocations()
     test_conversion_trigger_runs_after_everything_it_calls()
     test_failed_conversion_does_not_become_the_active_book()
+    test_convert_py_writes_nvram_the_reader_can_read()
     test_code_py_stays_out_of_the_readers_way()
     print("\nALL CONVERT CHECKS PASSED")

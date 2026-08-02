@@ -1289,6 +1289,15 @@ def convert_epub(epub_path):
     show_message(("Converting EPUB", 75, 40), ("Restarting...", 90, 70))
     try:
         import supervisor
+        # Run convert.py rather than this file. Restarting alone was not
+        # enough: code.py and its modules stay resident while it is the running
+        # program, and the converter reached the archive with 46KB free and no
+        # piece of it over 1KB, failing on a 525-byte chapter. convert.py loads
+        # the panel and the converter and nothing else.
+        try:
+            supervisor.set_next_code_file("convert.py")
+        except Exception as e:
+            print(f"set_next_code_file unavailable: {e}")
         supervisor.reload()          # does not return
     except Exception as e:
         print(f"reload unavailable, converting in place: {e}")

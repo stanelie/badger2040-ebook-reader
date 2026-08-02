@@ -279,10 +279,41 @@ def test_entry_point_runs_without_a_name_guard():
                 "convert.py guards its work behind __name__ - it will silently "
                 "do nothing if CircuitPython does not set it to '__main__'")
 
-    calls = [n for n in tree.body
-             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)]
-    assert any(isinstance(c.value.func, ast.Attribute) and c.value.func.attr == "main"
-               for c in calls), "convert.py never calls main() at module level"
+    # It now does one of two jobs, both at module level: convert the book the
+    # picker queued in NVRAM, or - run by hand with nothing queued - fall back
+    # to main() and convert whatever is in /books.
+    def _calls(nodes):
+        out = set()
+        for n in nodes:
+            for sub in ast.walk(n):
+                if isinstance(sub, ast.Call):
+                    f = sub.func
+                    out.add(getattr(f, "attr", None) or getattr(f, "id", None))
+        return out
+
+    top = _calls(tree.body)
+    assert "main" in top, (
+        "convert.py never falls back to main(), so running it by hand with "
+        "nothing queued does nothing")
+    assert "convert_book" in top, (
+        "convert.py never converts the queued book - that is what the picker "
+        "restarts into")
+    assert "load_pending" in top, "convert.py never reads the queued book"
+    assert "clear_pending" in top, (
+        "convert.py never clears the queued book; a conversion that resets "
+        "the board would repeat on every boot")
+
+    # and it must not import code.py: not loading the reader is the whole
+    # reason this file exists
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names]
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names.append(node.module)
+            for nm in names:
+                assert nm.split(".")[0] not in ("code", "__main__", "convert_ui"), (
+                    f"convert.py imports {nm} - it would pull the reader back "
+                    "into memory, which is exactly what it exists to avoid")
     print("  [ok] convert.py runs regardless of __name__")
 
 
