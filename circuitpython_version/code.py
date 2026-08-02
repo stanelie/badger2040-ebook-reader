@@ -549,12 +549,19 @@ spi = board.SPI()
 # Waveform for the first refresh after power-on, which has to drive every pixel
 # because the driver has just started and cannot know what is on the panel.
 #
-# Speed 0 is the panel's own factory table - the most thorough clear there is,
-# and measured at 3.45 of a 5.6 second boot, where laying out and drawing the
-# page took under a second. Speeds 1-6 use a computed waveform whose period
-# halves with each step, so 2 still drives every pixel charge-neutrally in a
-# quarter of the time. Set it to 0 if a previous image shows through.
-FIRST_REFRESH_SPEED = 2
+# 0 is the panel's own factory table. It is the slowest thing in the whole boot
+# - measured at 3.45 of 5.6 seconds, against under a second to lay out and draw
+# the page - and it is what the display is meant to look like.
+#
+# 1-6 use a computed waveform whose period halves with each step: 1 is 64, 2 is
+# 32, 4 (normal page turns) is 8. Shorter means less time driving each pixel,
+# so 2 booted faster and came up visibly pale, and every quick page turn after
+# it built on an under-developed image and went paler still. Contrast is the
+# point of an e-reader; the seconds are not worth it.
+#
+# 1 is the untried middle - twice the waveform of 2, still well short of the
+# factory table. Worth a look if the boot time matters more than it does now.
+FIRST_REFRESH_SPEED = 0
 
 ORIGINAL_SPEED = 4
 ORIGINAL_NO_FLICKERING = True

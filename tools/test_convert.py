@@ -961,25 +961,29 @@ def test_tethered_conversion_is_refused_before_restarting():
         "convert it")
     print("  [ok] tethered: queued and explained, no pointless restart")
 
-def test_first_refresh_is_not_the_slowest_waveform():
-    """Boot is dominated by one e-ink refresh, not by rendering.
+def test_first_refresh_drives_every_pixel():
+    """The first refresh after power-on cannot be a quick update.
 
-    Measured on the board: 1.19s to load state, 0.96s to lay out and draw the
-    page, then 3.45s for the panel. That refresh has to drive every pixel - the
-    driver has just started and cannot know what is on the screen - but speed 0
-    is the panel's own factory table, the most thorough and the slowest. The
-    computed waveforms halve their period per step and still drive every pixel
-    charge-neutrally below speed 4.
+    The driver has just started and does not know what is on the panel, so the
+    waveform has to drive every pixel rather than the ones it believes changed.
+    0 is the panel's factory table; 1-3 are computed and charge-neutral. From 4
+    up the waveform is the short one used for page turns, which would leave
+    whatever was on the screen showing through.
 
-    The full refresh a long press on A asks for is deliberately left at 0: the
-    user is waiting for that one on purpose.
+    Speed is not what this pins. Trying to buy boot time here was a mistake -
+    speed 2 came up visibly pale and every page turn after it built on an
+    under-developed image and went paler - so the constant is back at 0. What
+    must not happen is it drifting into the page-turn range.
     """
     src = open(os.path.join(CPDIR, "code.py")).read()
     speed = _const(src, "FIRST_REFRESH_SPEED")
-    assert 1 <= speed <= 3, (
-        f"FIRST_REFRESH_SPEED is {speed}; above 3 the waveform stops being "
-        "charge-neutral and will not clear the previous image, and 0 is the "
-        "slow factory table this exists to avoid")
+    normal = _const(src, "ORIGINAL_SPEED")
+    assert 0 <= speed <= 3, (
+        f"FIRST_REFRESH_SPEED is {speed}; from 4 up the waveform is the short "
+        "one used for page turns and will not clear the panel")
+    assert speed < normal, (
+        f"the first refresh ({speed}) is no more thorough than an ordinary "
+        f"page turn ({normal}), so it clears nothing")
 
     # every first-display refresh goes through the constant
     for node in ast.walk(ast.parse(src)):
@@ -1001,7 +1005,7 @@ def test_first_refresh_is_not_the_slowest_waveform():
             assert any("asked for" in l for l in around), (
                 f"line {node.lineno} does a full-flicker refresh at speed 0 "
                 "without saying why; on the boot path that is 3.45 seconds")
-    print(f"  [ok] first refresh at speed {speed}, not the factory table")
+    print(f"  [ok] first refresh at speed {speed}, drives every pixel")
 
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
@@ -1020,6 +1024,6 @@ if __name__ == "__main__":
     test_progress_forces_a_full_refresh_periodically()
     test_a_conversion_refused_for_usb_stays_queued()
     test_tethered_conversion_is_refused_before_restarting()
-    test_first_refresh_is_not_the_slowest_waveform()
+    test_first_refresh_drives_every_pixel()
     test_no_module_level_name_is_used_before_it_exists()
     print("\nALL CONVERT CHECKS PASSED")
