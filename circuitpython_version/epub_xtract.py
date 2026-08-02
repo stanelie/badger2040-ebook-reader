@@ -109,7 +109,7 @@ def mem_note(label):
 
 
 # -----------------------------------------------------------------
-def free_reader_memory():
+def free_reader_memory(keep_display=False):
     """Release whatever the reader is still holding.
 
     Running this from the REPL leaves code.py's globals alive - the three page
@@ -118,6 +118,13 @@ def free_reader_memory():
     between chapters converting and failing to allocate.
 
     Nothing is lost: reset afterwards and the reader rebuilds all of it.
+
+    `keep_display` spares the one page buffer and the driver's scratches, so a
+    caller that is drawing a progress bar can still reach the panel. That costs
+    about 10KB of the 60. It is the cheap 10KB to give back: those buffers are
+    allocated at startup, before anything else, so they sit at the bottom of the
+    heap and hold nothing apart. The hyphenation blob is the opposite - built on
+    first use, in the middle of everything - and it goes either way.
     """
     try:
         import gc
@@ -150,15 +157,19 @@ def free_reader_memory():
             reader = sys.modules.get("__main__")
         if reader is None:
             raise ImportError("no __main__")
-        for nm in ("raw_working_buffer", "current_rotated_buffer",
-                   "next_rotated_buffer", "prev_rotated_buffer",
-                   "_scratch_fb", "FONT"):
+        names = ["current_rotated_buffer", "next_rotated_buffer",
+                 "prev_rotated_buffer", "FONT"]
+        disp_names = []
+        if not keep_display:
+            names += ["raw_working_buffer", "_scratch_fb"]
+            disp_names = ["_rotate_scratch", "_partial_scratch"]
+        for nm in names:
             if getattr(reader, nm, None) is not None:
                 setattr(reader, nm, None)
                 dropped += 1
         disp = getattr(reader, "display", None)
         if disp is not None:
-            for nm in ("_rotate_scratch", "_partial_scratch"):
+            for nm in disp_names:
                 if getattr(disp, nm, None) is not None:
                     setattr(disp, nm, None)
                     dropped += 1
@@ -537,10 +548,29 @@ class HtmlToTextStreamer:
 
 
 # -----------------------------------------------------------------
-def run_extraction(epub_path):
+def _notify(progress, stage, done, total, name=""):
+    """Report progress to the caller, never letting the UI break the job.
+
+    A conversion takes a couple of minutes and the reader draws a progress bar
+    from these calls. Drawing to the panel can fail in ways decompression
+    cannot - a partial update refused, a buffer already handed back - and none
+    of that is a reason to abandon a book halfway through.
+    """
+    if progress is None:
+        return
+    try:
+        progress(stage, done, total, name)
+    except Exception as e:
+        log_status("progress callback failed (continuing): %s" % e)
+
+
+def run_extraction(epub_path, progress=None):
     """Convert an EPUB to /books/<name>.txt (+ .cover.<ext>).
 
     `epub_path` may be a full path or just a filename inside /books.
+    `progress`, if given, is called as progress(stage, done, total, name) with
+    stage one of "open"/"cover"/"chapter"/"done" - see _notify.
+
     Returns True if everything converted cleanly.
     """
     if epub_path.startswith("/"):
@@ -552,6 +582,7 @@ def run_extraction(epub_path):
     base_name = name[:-5] if name.lower().endswith(".epub") else name
 
     log_status("Processing: %s" % epub_full_path)
+    _notify(progress, "open", 0, 0, base_name)
 
     try:
         os.stat("/" + TARGET_DIR)
@@ -585,6 +616,7 @@ def run_extraction(epub_path):
 
             # Cover next: if the text conversion runs into trouble later, at
             # least the cover is already saved.
+            _notify(progress, "cover", 0, 0, base_name)
             extract_cover(uzf, base_path)
             try:
                 import gc
@@ -609,6 +641,7 @@ def run_extraction(epub_path):
             ordered = plain + [m for _, m in numbered]
             total = len(ordered)
             log_status("Files to process: %d" % total)
+            _notify(progress, "start", 0, total, base_name)
 
 
             if not total:
@@ -641,6 +674,7 @@ def run_extraction(epub_path):
                                        % (idx, total, member[-20:], csize, usize))
                     else:
                         log_status("[%d/%d] %s" % (idx, total, member[-24:]))
+                    _notify(progress, "chapter", idx - 1, total, base_name)
                     try:
                         reader = uzf.get_reader(member)
                         stripper = HtmlToTextStreamer(reader)
@@ -662,6 +696,7 @@ def run_extraction(epub_path):
                         log_status("Failed %s: %s" % (member, e))
                         success = False
 
+            _notify(progress, "chapter", extracted, total, base_name)
             log_status("--- EXTRACTION COMPLETE ---")
             log_status("Combined %d/%d files -> %s" % (extracted, total, concat_path))
             if failures:
@@ -674,6 +709,48 @@ def run_extraction(epub_path):
         log_status("--- EXTRACTION FAILED ---")
         log_status("Error: %s" % e)
         return False
+
+
+# -----------------------------------------------------------------
+def txt_path_for(epub_path):
+    """Where convert_book() will write the text for this EPUB."""
+    name = epub_path.split("/")[-1]
+    base = name[:-5] if name.lower().endswith(".epub") else name
+    return "/%s/%s.txt" % (TARGET_DIR, base)
+
+
+def convert_book(epub_path, progress=None, keep_display=True):
+    """Convert one named EPUB, for the reader to call from the picker.
+
+    Same job as main(), without the search for something to convert: the user
+    has already chosen. Returns the path of the .txt on success, else None, so
+    the caller can open what it just made without recomputing the name.
+
+    keep_display defaults to True here because the caller is on the device with
+    a progress bar on screen; main(), driven from the REPL, has no such need.
+    """
+    print("\n--- EPUB EXTRACTOR ---")
+    print("[EXTRACTOR] build: %s | %s" % (uzipfile.BUILD, inflate.BUILD))
+    free_reader_memory(keep_display=keep_display)
+    mem_note("At start")
+    if not ensure_writable():
+        _notify(progress, "readonly", 0, 0, "")
+        return None
+    t0 = time.monotonic()
+    ok = run_extraction(epub_path, progress=progress)
+    log_status("Took %.1fs" % (time.monotonic() - t0))
+    out = txt_path_for(epub_path)
+    try:
+        os.stat(out)
+    except OSError:
+        log_status("No text file was produced")
+        _notify(progress, "failed", 0, 0, "")
+        return None
+    # A partial book is still a book: if some chapters could not be
+    # decompressed the rest is on disk and worth opening, so report the path
+    # either way and let the caller say so.
+    _notify(progress, "done" if ok else "partial", 0, 0, "")
+    return out
 
 
 # -----------------------------------------------------------------

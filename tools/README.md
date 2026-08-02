@@ -23,6 +23,7 @@ python3 tools/test_power.py           # sleep / inactivity behaviour
 python3 tools/test_picker.py          # book picker paging + input loop
 python3 tools/test_display.py         # e-ink rotation + partial-update windows
 python3 tools/test_epub.py            # EPUB -> text converter
+python3 tools/test_convert.py         # converting from the picker + progress bar
 ```
 
 Both run against every installed `.pf` font by default; pass a font filename to
@@ -109,6 +110,18 @@ when no free block is big enough for `zlib.decompress`'s output, against zlib
 across stored / fixed-Huffman / dynamic-Huffman blocks, overlapping copies and
 window-crossing matches — and that forcing the fallback gives byte-identical
 results to the fast path.
+
+### test_convert.py
+
+Covers wiring the converter into the picker: that an EPUB is offered only until
+its `.txt` exists, that the path the converter writes is exactly the one the
+picker suppresses the EPUB on (they are computed in two different files, and a
+mismatch would silently re-convert on every pick), and that the progress bar
+throttles its refreshes - a 75-chapter book redraws about 26 times, not 75,
+because each e-ink update is time the conversion is not using.
+
+Also checks `free_reader_memory(keep_display=True)` spares exactly the buffers
+the progress screen draws through while still releasing the rest.
 
 ## Font builders
 
