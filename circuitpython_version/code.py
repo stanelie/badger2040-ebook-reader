@@ -1938,6 +1938,7 @@ if font_index != 0:
 
 # Render current page
 render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+_boot_mark("  page rendered (layout + glyphs + rotate)")
 
 # Full refresh for first display update (only if file_picker wasn't shown)
 if first_display_update:
@@ -1948,10 +1949,11 @@ if first_display_update:
 else:
     update_display_fast(current_rotated_buffer)
 
-_boot_mark("first page on screen")
+_boot_mark("  panel refreshed")
 
 # Pre-render the neighbouring pages so the first press either way is instant
 prerender_next()
+_boot_mark("  next page pre-rendered")
 prerender_prev()
 
 _boot_mark("neighbour pages")

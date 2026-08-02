@@ -127,13 +127,19 @@ class PropFont:
         stride = getattr(fb, "stride", W)  # bits per row; == width for MHMSB
         row_bytes = stride >> 3
         first_n = extra_first
+        # Loop-invariant, so tested once rather than per glyph. Measured on a
+        # desktop this changes nothing - the call was not the expense - but a
+        # branch is no worse than a call and this is the reader's hot path.
+        in_ram = self._f is None
+        blob = self.d
 
         for ch in s:
             adv, bw, off = self._rec(ch)
             rb = (bw + 7) // 8
-            # One fetch per glyph: `d` is the whole blob in memory, or the
-            # scratch buffer holding just this glyph when file-backed.
-            d, off = self._glyph(off, rb * box_h)
+            if in_ram:
+                d = blob
+            else:
+                d, off = self._glyph(off, rb * box_h)
             dst0 = x >> 3
             shift = x & 7
             nbytes = (shift + bw + 7) >> 3
@@ -199,10 +205,15 @@ class PropFont:
     def _draw_slow(self, fb, s, x, y, color, extra_each, extra_first):
         box_h = self.box_h
         first_n = extra_first
+        in_ram = self._f is None
+        blob = self.d
         for ch in s:
             adv, bw, off = self._rec(ch)
             rb = (bw + 7) // 8
-            d, off = self._glyph(off, rb * box_h)
+            if in_ram:
+                d = blob
+            else:
+                d, off = self._glyph(off, rb * box_h)
             for ry in range(box_h):
                 base = off + ry * rb
                 yy = y + ry
