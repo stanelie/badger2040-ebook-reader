@@ -193,6 +193,86 @@ def test_shared_font_buffer_loads_identically():
     print(f"  [ok] {len(fonts)} fonts load identically through one "
           f"{biggest}-byte buffer")
 
+def test_file_backed_font_renders_identically():
+    """A file-backed .pf must draw exactly what the in-memory one draws.
+
+    The interface font is opened this way so it holds ~1KB instead of the whole
+    file, replacing vga2_8x16 and its 4KB of resident glyph data. That is only
+    worth anything if the pixels are the same, so every installed font is
+    rendered both ways and compared byte for byte - including the justified and
+    the pixel-at-a-time paths, which fetch glyphs through the same call.
+    """
+    import propfont
+    import adafruit_framebuf as afb
+
+    W, H = 296, 128
+    fonts = sorted(f for f in os.listdir(CPDIR) if f.endswith(".pf"))
+    assert fonts, "no .pf fonts installed"
+
+    sample = [("Select Book:  (.epub converts)", 5, 5, 1),
+              ("The Last Town.txt", 5, 25, 1),
+              ("inverted row", 5, 41, 0),          # colour 0 takes the slow path
+              ("012345 !@#$%^&*()_+-=[]{};'", 5, 57, 1),
+              ("edge", 0, 73, 1),                  # x == 0
+              ("clipped at the right margin", 250, 89, 1),
+              ("bottom", 2, 120, 1)]               # clipped vertically
+
+    def render(font):
+        buf = bytearray(W * H // 8)
+        fb = afb.FrameBuffer(buf, W, H, afb.MHMSB)
+        for s, x, y, c in sample:
+            font.draw(fb, s, x, y, c)
+        font.draw_justified(fb, "the quick brown fox jumps", 2, 105, 1, 290)
+        return bytes(buf)
+
+    for name in fonts:
+        path = os.path.join(CPDIR, name)
+        mem = propfont.PropFont(path)
+        disk = propfont.PropFont(path, file_backed=True)
+        try:
+            assert render(mem) == render(disk), (
+                f"{name}: file-backed rendering differs from in-memory")
+            for c in range(32, 127):
+                assert mem._rec(chr(c)) == disk._rec(chr(c)), (
+                    f"{name}: glyph record for {chr(c)!r} differs")
+            assert (mem.box_h, mem.baseline, mem.space_w, mem.count) == (
+                disk.box_h, disk.baseline, disk.space_w, disk.count), (
+                f"{name}: metrics differ")
+
+            # and it must actually hold less, or there is no point
+            held = len(disk.d) + len(disk._gbuf)
+            assert held < len(mem.d), (
+                f"{name}: file-backed holds {held} bytes against {len(mem.d)} "
+                "in memory - it is not saving anything")
+        finally:
+            disk.deinit()
+
+    # the reading font must NOT be file-backed: the page renderer's speed comes
+    # from shifting bytes out of a resident blob
+    code = open(os.path.join(CPDIR, "code.py")).read()
+    for line in code.splitlines():
+        if "PropFont(AVAILABLE_FONTS" in line:
+            assert "file_backed" not in line, (
+                "the reading font is opened file-backed; page rendering would "
+                "seek the flash for every glyph")
+    assert "file_backed=True" in code, "the interface font is not file-backed"
+
+    # ...and the driver has to actually be given it. Passing None is silent:
+    # text() falls back to font5x8, so the chrome renders in a 5x8 cell inside
+    # a layout built for 8x16 rather than failing.
+    tree = ast.parse(code)
+    handed = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "UC8151":
+            for kw in node.keywords:
+                if kw.arg == "ui_font":
+                    handed = kw.value
+    assert handed is not None, "the display is constructed without ui_font"
+    assert not (isinstance(handed, ast.Constant) and handed.value is None), (
+        "ui_font=None is passed to the display; interface text would quietly "
+        "fall back to font5x8 in a layout built for 8px cells")
+    print(f"  [ok] file-backed rendering is identical for {len(fonts)} fonts")
+
 def main():
     print("book picker:")
     test_paging_matches_old_behaviour()
@@ -202,6 +282,7 @@ def main():
     test_selection_moves_use_partial_refresh()
     test_font_switch_failure_keeps_index_and_font_in_step()
     test_shared_font_buffer_loads_identically()
+    test_file_backed_font_renders_identically()
     print("\nALL PICKER CHECKS PASSED")
     return 0
 

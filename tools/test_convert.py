@@ -319,6 +319,13 @@ def test_code_py_stays_out_of_the_readers_way():
     # point of it - and it buys back far more than it costs: a conversion boot
     # now skips the 31.5KB pattern blob, the font and three screen buffers.
     #
+    # 67500 -> 68000: the interface font moved from vga2_8x16 to a file-backed
+    # oldmono.pf. This budget counts only code.py's own bytecode, so it sees
+    # 277 bytes added and none of the 17.8KB module deleted or the ~4KB of
+    # resident glyph data that went with it. Measuring one file was always a
+    # proxy; here it points the wrong way, so the deletion is asserted below
+    # rather than trusted to this number.
+    #
     # 67000 -> 67500: recovery when a conversion boot raises. Without it the
     # board stops dead with a blinking LED and no screen, having skipped the
     # page buffers it would need to carry on; 189 bytes to restart into a
@@ -333,7 +340,7 @@ def test_code_py_stays_out_of_the_readers_way():
     # well below any of these numbers. It was not done here because the gain
     # needed was 189 bytes and the picker is the part of this codebase with the
     # most recent history of subtle breakage.
-    budget = 67500
+    budget = 68000
     assert size <= budget, (
         f"code.py compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "
@@ -345,6 +352,20 @@ def test_code_py_stays_out_of_the_readers_way():
     for leaked in ("_draw_convert_screen", "_convert_progress", "_CONV_BAR"):
         assert leaked not in src, (
             f"{leaked} is back in code.py; it belongs in convert_ui.py")
+
+    # The interface font must stay a .pf. vga2_8x16 held 4KB of glyph data
+    # resident for the whole session, and comparing the two showed all 95
+    # printable ASCII glyphs byte-identical to oldmono.pf - the same typeface
+    # shipped twice, in two formats.
+    assert not os.path.exists(os.path.join(CPDIR, "vga2_8x16.py")), (
+        "vga2_8x16.py is back; oldmono.pf carries the same glyphs and the "
+        "module costs ~4KB of RAM for as long as the reader runs")
+    for f in ("code.py", "convert.py", "convert_ui.py"):
+        text = open(os.path.join(CPDIR, f)).read()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and "vga2_8x16" in stripped:
+                raise AssertionError(f"{f} imports vga2_8x16 again: {stripped}")
     print(f"  [ok] code.py is {size} bytes, within the {budget} budget")
 
 def test_pending_conversion_round_trips_through_nvram():

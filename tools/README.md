@@ -121,7 +121,10 @@ throttles its refreshes - a 75-chapter book redraws about 26 times, not 75,
 because each e-ink update is time the conversion is not using.
 
 Also checks `free_reader_memory(keep_display=True)` spares exactly the buffers
-the progress screen draws through while still releasing the rest.
+the progress screen draws through while still releasing the rest, and that
+`vga2_8x16.py` stays deleted - its 95 printable glyphs were byte-identical to
+`oldmono.pf`, so the same typeface was shipping twice and costing ~4KB of RAM
+for the copy nobody needed.
 
 And it holds `code.py` to a size budget. code.py is compiled into RAM when the
 board boots and stays resident for the whole session, so every byte in it is

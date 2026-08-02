@@ -8,15 +8,31 @@ of character counts.
 
 
 class PropFont:
-    def __init__(self, path, min_space_ratio=0.30, buf=None):
+    def __init__(self, path, min_space_ratio=0.30, buf=None, file_backed=False):
         # `buf`, when given, is a buffer big enough for any installed font,
         # reused for every load. Only one font is ever live, so reading into it
         # costs nothing and - the point - allocates nothing: switching fonts on
         # a heap the reader has been paginating into used to need a fresh ~4KB
         # in one piece, which is exactly what a fragmented heap cannot give.
+        #
+        # `file_backed` keeps only the header and the per-glyph records in RAM
+        # (a few hundred bytes) and reads each glyph's rows from the file as it
+        # is drawn. That is for the interface font, which draws a couple of
+        # hundred glyphs on a screen that already pays a ~1s panel refresh -
+        # not for the reading font, where holding the whole file is what lets
+        # draw() shift bytes instead of touching pixels.
+        self._f = None
+        self._gbuf = None
         f = open(path, "rb")
         try:
-            if buf is None:
+            if file_backed:
+                head = f.read(9)
+                if len(head) < 9 or bytes(head[:4]) != b"PFN1":
+                    raise ValueError("bad font file")
+                d = head + f.read(head[7] * 4)   # header + glyph records
+                self._f = f
+                f = None                          # kept open for glyph reads
+            elif buf is None:
                 d = f.read()
             else:
                 n = f.readinto(buf)
@@ -24,7 +40,8 @@ class PropFont:
                     raise ValueError("empty font file")
                 d = buf
         finally:
-            f.close()
+            if f is not None:
+                f.close()
         # bytes() around the slice: `buf` may be a bytearray, and comparing a
         # bytearray slice to a bytes literal is not reliable across ports.
         if bytes(d[:4]) != b"PFN1":
@@ -42,6 +59,38 @@ class PropFont:
         self.bmp0 = self.rec0 + self.count * 4
         self._qmark = ord("?")
         self._space_idx = ord(" ") - self.first
+        if self._f is not None:
+            # One glyph's rows at a time, sized from the widest glyph the font
+            # actually declares rather than a guess.
+            widest = 0
+            for i in range(self.count):
+                bw = d[self.rec0 + i * 4 + 1]
+                if bw > widest:
+                    widest = bw
+            self._gbuf = bytearray(self.box_h * ((widest + 7) // 8) or 1)
+
+    def _glyph(self, off, n):
+        """Return (data, base) for a glyph's `n` bitmap bytes at file offset
+        `off`. In memory that is the blob itself; file-backed it is one read
+        into the scratch buffer, so a glyph costs a seek rather than a seek per
+        byte."""
+        if self._f is None:
+            return self.d, off
+        self._f.seek(off)
+        try:
+            self._f.readinto(memoryview(self._gbuf)[:n])
+        except Exception:
+            self._gbuf[:n] = self._f.read(n)     # ports without readinto
+        return self._gbuf, 0
+
+    def deinit(self):
+        """Close the font file, for a file-backed font."""
+        if self._f is not None:
+            try:
+                self._f.close()
+            except Exception:
+                pass
+            self._f = None
 
     def _rec(self, ch):
         idx = ord(ch) - self.first
@@ -72,7 +121,6 @@ class PropFont:
         buf = getattr(fb, "buf", None)
         if buf is None:
             return self._draw_slow(fb, s, x, y, color, extra_each, extra_first)
-        d = self.d
         box_h = self.box_h
         W = fb.width
         H = fb.height
@@ -83,6 +131,9 @@ class PropFont:
         for ch in s:
             adv, bw, off = self._rec(ch)
             rb = (bw + 7) // 8
+            # One fetch per glyph: `d` is the whole blob in memory, or the
+            # scratch buffer holding just this glyph when file-backed.
+            d, off = self._glyph(off, rb * box_h)
             dst0 = x >> 3
             shift = x & 7
             nbytes = (shift + bw + 7) >> 3
@@ -146,12 +197,12 @@ class PropFont:
         return x
 
     def _draw_slow(self, fb, s, x, y, color, extra_each, extra_first):
-        d = self.d
         box_h = self.box_h
         first_n = extra_first
         for ch in s:
             adv, bw, off = self._rec(ch)
             rb = (bw + 7) // 8
+            d, off = self._glyph(off, rb * box_h)
             for ry in range(box_h):
                 base = off + ry * rb
                 yy = y + ry

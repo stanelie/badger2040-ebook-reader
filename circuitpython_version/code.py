@@ -9,8 +9,6 @@ import digitalio
 import time
 import os
 import struct
-import vga2_8x16
-# import sans_serif_8x16 as vga2_8x16
 import gc
 import adafruit_framebuf
 import analogio
@@ -197,6 +195,17 @@ font_index = 0
 # The progress screen draws through the driver's own text routine, so a
 # conversion boot needs no reading font.
 FONT = None if PENDING_CONVERT else propfont.PropFont(AVAILABLE_FONTS[0][0], buf=_font_buf)
+
+# The interface font, separate from the reading font and deliberately fixed:
+# the picker's layout - 33-character rows, 16px bands, the XOR highlight - is
+# built on 8px monospace cells, and it should not change because the B button
+# was pressed. oldmono.pf is that font, and file-backed it holds about 1KB
+# instead of the 4KB vga2_8x16 kept resident for the same glyphs.
+_ui_font = None
+try:
+    _ui_font = propfont.PropFont("oldmono.pf", file_backed=True)
+except Exception as _e:
+    print(f"interface font unavailable, falling back to font5x8: {_e}")
 
 LED_DUTY_CYCLE = 40
 INACTIVITY_TIMEOUT = 300
@@ -519,12 +528,17 @@ display = UC8151(
     rst=board.INKY_RST,
     busy=board.INKY_BUSY,
     rotation=270,
-    # external_font wins in the driver's text(), so vga2_8x16 draws every piece
-    # of reader chrome and the two arguments below are never reached from
-    # display.text(). font5x8.bin is still needed on the drive, though: the
-    # status lines call temp_fb.text(font_name="font5x8.bin") directly, and
-    # convert.py runs without an external font at all.
-    external_font=vga2_8x16,
+    # Interface text comes from oldmono.pf, opened file-backed: the header and
+    # glyph records stay in RAM (about 1KB) and each glyph's rows are read as
+    # they are drawn. This used to be vga2_8x16, a module holding 4KB of glyph
+    # data resident for the whole session - byte-for-byte the same typeface as
+    # oldmono.pf, so the same font shipped twice in two formats.
+    #
+    # File-backed is right here and wrong for reading text: a screen of chrome
+    # is ~200 glyphs behind a refresh that costs a second anyway, whereas the
+    # page renderer's speed comes from having the whole font in memory to shift
+    # bytes out of.
+    ui_font=_ui_font,
     use_framebuf_font=True,
     font_path="font5x8.bin",
     speed=ORIGINAL_SPEED,
@@ -1230,8 +1244,11 @@ def _draw_book_list(books, selected, per_page, highlight=True):
         if len(books) > per_page:
             page = offset // per_page + 1
             total = (len(books) + per_page - 1) // per_page
-            display.text(f"{page}/{total}", WIDTH - (vga2_8x16.WIDTH * 5),
-                         HEIGHT - vga2_8x16.HEIGHT - 10, 1)
+            label = f"{page}/{total}"
+            # Measured rather than assumed five 8px cells - the interface font
+            # is a .pf now, and it can say how wide its own text is.
+            display.text(label, WIDTH - _ui_font.text_width(label) - 8,
+                         HEIGHT - _ui_font.box_h - 10, 1)
 
         storage_status = get_storage_status()
         STATUS_X = WIDTH - (len(storage_status) * FONT_W_5X8) - TEXT_PADDING

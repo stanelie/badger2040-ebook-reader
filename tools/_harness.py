@@ -20,6 +20,10 @@ import textwrap
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPDIR = os.path.normpath(os.path.join(HERE, "..", "circuitpython_version"))
 sys.path.insert(0, CPDIR)
+# adafruit_framebuf is vendored here rather than in the install folder, so a
+# copy of it never lands at the drive root and shadows lib/'s .mpy.
+THIRD_PARTY = os.path.normpath(os.path.join(HERE, "..", "third_party"))
+sys.path.insert(0, THIRD_PARTY)
 
 import hyphenator  # noqa: E402  (needs CPDIR on the path first)
 import propfont  # noqa: E402

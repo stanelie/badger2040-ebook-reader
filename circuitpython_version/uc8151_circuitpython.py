@@ -8,7 +8,6 @@
 import time
 import digitalio
 import adafruit_framebuf
-from terminalio import FONT as terminal_font
 
 ### Commands list.
 # Commands are executed putting the DC line in command mode
@@ -149,8 +148,8 @@ class UC8151:
     def __init__(self, spi, *, cs, dc, rst, busy, width=128, height=296, speed=0, 
                  mirror_x=False, mirror_y=False, inverted=False, no_flickering=False, 
                  debug=False, full_update_period=50, dangerous_reaffirm_black=False,
-                 use_framebuf_font=False, font_path="font5x8.bin", rotation=0, 
-                 external_font=None):
+                 use_framebuf_font=False, font_path="font5x8.bin", rotation=0,
+                 ui_font=None):
         """
         Initialize the UC8151 e-ink display driver.
         
@@ -159,8 +158,10 @@ class UC8151:
                      For Badger 2040, use rotation=270 to correct orientation.
             use_framebuf_font: If True, use adafruit_framebuf's font (requires font5x8.bin).
             font_path: Path to font5x8.bin file (only used if use_framebuf_font=True).
-            external_font: Python font module (like vga2_8x16) with FONT, WIDTH, HEIGHT attributes.
-                          If provided, this will be used instead of terminalio or framebuf font.
+            ui_font: a propfont.PropFont for interface text. Preferred over
+                     use_framebuf_font. The reader passes oldmono.pf opened
+                     file-backed, which is the same typeface the old vga2_8x16
+                     module held as 4KB of resident glyph data.
         """
         
         # First, try to deinitialize any existing display that might be using the pins
@@ -170,7 +171,7 @@ class UC8151:
         self.use_framebuf_font = use_framebuf_font
         self.font_path = font_path
         self.rotation = rotation
-        self.external_font = external_font
+        self.ui_font = ui_font
         
         # Store the original dimensions as physical dimensions
         self.physical_width = width
@@ -269,116 +270,25 @@ class UC8151:
             x, y: Position (top-left corner)
             color: 1 for black, 0 for white
         """
-        if self.external_font:
-            # Use external Python font module (like vga2_8x16)
-            self._draw_text_external(string, x, y, color)
+        if self.ui_font is not None:
+            # A .pf bitmap font, the same format the reader's text uses. The
+            # interface font used to be a separate Python module holding 4KB of
+            # glyphs, which was the same typeface as oldmono.pf twice over.
+            self.ui_font.draw(self.fb, string, x, y, color)
         elif self.use_framebuf_font:
-            # Use adafruit_framebuf's text method (requires font5x8.bin)
+            # adafruit_framebuf's own text(), from font5x8.bin. convert.py uses
+            # this: BitmapFont seeks the file per character and holds almost no
+            # RAM, which matters more there than drawing speed does.
             try:
                 self.fb.text(string, x, y, color, font_name=self.font_path)
             except Exception as e:
                 print(f"Error loading framebuf font: {e}")
                 print("Make sure font5x8.bin is in the correct location.")
         else:
-            # Use terminalio font (no extra file needed)
-            self._draw_text_terminalio(string, x, y, color)
+            raise RuntimeError("no font: pass ui_font or use_framebuf_font")
     
-    def _draw_text_external(self, string, x, y, color):
-        """
-        Draw text using an external Python font module - BYTE-LEVEL OPTIMIZED.
-        Processes entire character columns when byte-aligned.
-        """
-        font_data = self.external_font.FONT
-        char_width = self.external_font.WIDTH
-        char_height = self.external_font.HEIGHT
-        first_char = self.external_font.FIRST
-        last_char = self.external_font.LAST
         
-        fb = self.raw_fb
-        fb_width = self.width
-        
-        cursor_x = x
-        for char in string:
-            ascii_val = ord(char)
-            
-            if ascii_val < first_char or ascii_val > last_char:
-                cursor_x += char_width
-                continue
-            
-            # Calculate offset in font data
-            font_idx = (ascii_val - first_char) * char_height
-            
-            # Draw character row by row
-            for y_off in range(char_height):
-                py = y + y_off
-                if py < 0 or py >= self.height:
-                    continue
-                
-                row_byte = font_data[font_idx + y_off]
-                if row_byte == 0:
-                    continue
-                
-                # Calculate starting position in framebuffer
-                px = cursor_x
-                base_idx = py * fb_width + px
-                
-                # Process each bit in the font row byte
-                for bit_pos in range(char_width):
-                    if row_byte & (0x80 >> bit_pos):
-                        pixel_idx = base_idx + bit_pos
-                        byte_idx = pixel_idx >> 3
-                        bit_idx = 7 - (pixel_idx & 7)
-                        
-                        if color:
-                            fb[byte_idx] |= (1 << bit_idx)
-                        else:
-                            fb[byte_idx] &= ~(1 << bit_idx)
-            
-            cursor_x += char_width
     
-    def _draw_text_terminalio(self, string, x, y, color):
-        """
-        Internal method to draw text using terminalio font.
-        The terminalio font has characters spaced 6 pixels apart in the atlas.
-        """
-        # Get the font bitmap
-        sample_glyph = terminal_font.get_glyph(ord('A'))
-        bitmap = sample_glyph.bitmap
-        
-        char_spacing = 6  # Characters are 6 pixels apart in the atlas
-        font_height = bitmap.height  # Should be 12
-        
-        cursor_x = x
-        for char in string:
-            glyph = terminal_font.get_glyph(ord(char))
-            if glyph is None:
-                cursor_x += char_spacing
-                continue
-            
-            # Calculate position in atlas
-            # Characters are laid out by ASCII value starting at 32 (space)
-            ascii_val = ord(char)
-            atlas_index = ascii_val - 32
-            atlas_x = atlas_index * char_spacing
-            atlas_y = 0
-            
-            # Draw the character
-            glyph_width = min(glyph.width, char_spacing)
-            glyph_height = glyph.height
-            
-            for dy in range(glyph_height):
-                for dx in range(glyph_width):
-                    try:
-                        pixel = bitmap[atlas_x + dx, atlas_y + dy]
-                        if pixel:
-                            px = cursor_x + dx
-                            py = y + dy
-                            if 0 <= px < self.width and 0 <= py < self.height:
-                                self.fb.pixel(px, py, color)
-                    except:
-                        pass
-            
-            cursor_x += glyph.shift_x
     
 
     def _release_existing_display(self):
