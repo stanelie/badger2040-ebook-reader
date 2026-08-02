@@ -604,6 +604,7 @@ def main():
     test_stored_blocks_stream_instead_of_buffering()
     test_output_paginates_in_the_reader()
     test_empty_output_fails_and_leaves_a_log()
+    test_source_epub_removed_only_after_a_clean_conversion()
     test_writing_is_refused_while_the_usb_host_holds_the_drive()
     print("\nALL EPUB CHECKS PASSED")
     return 0
@@ -743,6 +744,88 @@ def test_empty_output_fails_and_leaves_a_log():
          epub_xtract.log_status) = real
         epub_xtract.close_log()
     print("  [ok] an empty conversion fails, reports counts, and leaves a log")
+
+def test_source_epub_removed_only_after_a_clean_conversion():
+    """The EPUB is deleted once converted, but only when nothing failed.
+
+    It is the largest file in /books and the .txt plus the cover replace it, so
+    removing it is what makes room for the next book. Deleting it after a
+    partial run would be different: that leaves an incomplete book and no
+    source to make it again.
+    """
+    real = (epub_xtract.run_extraction, epub_xtract._writable,
+            epub_xtract.TARGET_DIR, epub_xtract.LAST_COUNTS,
+            epub_xtract.DELETE_SOURCE_AFTER_CONVERT, epub_xtract.VERBOSE,
+            epub_xtract.log_status)
+    # Checked before it is overridden below: the shipped default is what
+    # actually reclaims the space, and forcing it on here would hide a change
+    # to it.
+    assert real[4] is True, (
+        "DELETE_SOURCE_AFTER_CONVERT no longer defaults to True, so a "
+        "converted .epub stays on the board and nothing is reclaimed")
+
+    epub_xtract._writable = lambda: True
+    epub_xtract.VERBOSE = False
+    epub_xtract.log_status = lambda msg: None
+    epub_xtract.DELETE_SOURCE_AFTER_CONVERT = True
+
+    def fresh():
+        tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(tmp, "books"))
+        src = os.path.join(tmp, "books", "Alice.epub")
+        build_epub(src, [("ch1.xhtml", "One"), ("ch2.xhtml", "Two")])
+        epub_xtract.TARGET_DIR = tmp.lstrip("/") + "/books"
+        return tmp, src
+
+    try:
+        # clean run -> gone
+        tmp, src = fresh()
+        out = epub_xtract.convert_book(src, keep_display=False)
+        assert out and os.path.getsize(out) > 0, "clean conversion produced nothing"
+        assert not os.path.exists(src), (
+            "a clean conversion left the .epub behind; nothing is reclaimed")
+
+        # partial run -> kept, and the text is still usable
+        tmp, src = fresh()
+        base = epub_xtract.run_extraction
+
+        def partial(path, progress=None):
+            base(path, progress=progress)
+            epub_xtract.LAST_COUNTS = (1, 99)
+            return False
+        epub_xtract.run_extraction = partial
+        out = epub_xtract.convert_book(src, keep_display=False)
+        epub_xtract.run_extraction = base
+        assert os.path.exists(src), (
+            "a partial conversion deleted the only copy of the book - the "
+            "text is incomplete and there is now no way to redo it")
+        assert out, "a partial conversion should still hand back what it wrote"
+
+        # nothing written -> kept
+        tmp, src = fresh()
+
+        def nothing(path, progress=None):
+            open(epub_xtract.txt_path_for(path), "wb").close()
+            epub_xtract.LAST_COUNTS = (0, 99)
+            return False
+        epub_xtract.run_extraction = nothing
+        assert epub_xtract.convert_book(src, keep_display=False) is None
+        epub_xtract.run_extraction = base
+        assert os.path.exists(src), "an empty conversion deleted the source"
+
+        # switch respected
+        tmp, src = fresh()
+        epub_xtract.DELETE_SOURCE_AFTER_CONVERT = False
+        epub_xtract.convert_book(src, keep_display=False)
+        assert os.path.exists(src), (
+            "DELETE_SOURCE_AFTER_CONVERT=False did not keep the source")
+    finally:
+        (epub_xtract.run_extraction, epub_xtract._writable,
+         epub_xtract.TARGET_DIR, epub_xtract.LAST_COUNTS,
+         epub_xtract.DELETE_SOURCE_AFTER_CONVERT, epub_xtract.VERBOSE,
+         epub_xtract.log_status) = real
+        epub_xtract.close_log()
+    print("  [ok] the .epub goes only after a clean conversion")
 
 if __name__ == "__main__":
     sys.exit(main())

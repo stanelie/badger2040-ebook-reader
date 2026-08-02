@@ -47,6 +47,10 @@ MAX_STATUS_LINES = 6
 # report. A conversion can finish, write the file and still have extracted
 # nothing, which used to look exactly like success.
 LAST_COUNTS = (0, 0)
+# Delete the .epub once it has converted cleanly. It is by far the largest file
+# in /books - the reason only a book or two fits on the board - and the .txt
+# plus the cover replace it entirely. Set False to keep the source.
+DELETE_SOURCE_AFTER_CONVERT = True
 STATUS_HISTORY = []
 
 
@@ -632,12 +636,8 @@ def run_extraction(epub_path, progress=None):
 
     Returns True if everything converted cleanly.
     """
-    if epub_path.startswith("/"):
-        epub_full_path = epub_path
-        name = epub_path.split("/")[-1]
-    else:
-        epub_full_path = "/%s/%s" % (TARGET_DIR, epub_path)
-        name = epub_path
+    epub_full_path = source_path(epub_path)
+    name = epub_path.split("/")[-1]
     base_name = name[:-5] if name.lower().endswith(".epub") else name
 
     log_status("Processing: %s" % epub_full_path)
@@ -774,6 +774,13 @@ def run_extraction(epub_path, progress=None):
 
 
 # -----------------------------------------------------------------
+def source_path(epub_path):
+    """Full path of the EPUB, whether given as a name or an absolute path."""
+    if epub_path.startswith("/"):
+        return epub_path
+    return "/%s/%s" % (TARGET_DIR, epub_path)
+
+
 def txt_path_for(epub_path):
     """Where convert_book() will write the text for this EPUB."""
     name = epub_path.split("/")[-1]
@@ -829,6 +836,23 @@ def convert_book(epub_path, progress=None, keep_display=True):
         return None
     log_status("Wrote %d bytes to %s (%d of %d chapters)"
                % (written, out, done_n, total_n))
+
+    # The EPUB has done its job, and it is the largest thing in /books - the
+    # reason only a book or two fits on the board at a time. Removed only after
+    # a clean run: a partial conversion is the one case where the source is
+    # still needed, since deleting it would leave an incomplete book and no way
+    # to make it again.
+    if DELETE_SOURCE_AFTER_CONVERT and ok and done_n == total_n and total_n:
+        try:
+            src = source_path(epub_path)
+            freed = os.stat(src)[6]
+            os.remove(src)
+            log_status("Removed %s (%d bytes reclaimed)" % (src, freed))
+        except Exception as e:
+            log_status("Could not remove %s: %s" % (source_path(epub_path), e))
+    elif DELETE_SOURCE_AFTER_CONVERT:
+        log_status("Keeping %s - only %d of %d chapters converted"
+                   % (source_path(epub_path), done_n, total_n))
     close_log()
     # A partial book is still a book: if some chapters could not be
     # decompressed the rest is on disk and worth opening, so report the path

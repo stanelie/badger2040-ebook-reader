@@ -1219,7 +1219,7 @@ def _draw_book_list(books, selected, per_page, highlight=True):
     offset = (selected // per_page) * per_page
 
     with _ScratchFrame() as temp_fb:
-        display.text("Select Book:  (.epub converts)", 5, 5, 1)
+        display.text("Select Book:", 5, 5, 1)
 
         for i in range(per_page):
             idx = offset + i

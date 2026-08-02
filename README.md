@@ -26,7 +26,12 @@ Installing (circuitpython version) :
 
 Usage :
 - put .txt or .epub ebook file into /books folder of the badger2040
-- selecting an .epub in the picker converts it on the spot, with a progress bar, then opens it
+- selecting an .epub in the picker converts it and opens the result. The board restarts into
+  the converter, shows a progress bar, then restarts back into the reader
+- the .epub is deleted once it has converted cleanly - the .txt and the cover replace it, and
+  it is the largest file on the board. A conversion that failed part-way keeps its source, so
+  it can be retried; set `DELETE_SOURCE_AFTER_CONVERT = False` in epub_xtract.py to always
+  keep it
 - button A brings up the file picker, up and down arrows to select book, button A again to choose book
 - button UP for previous page, button DOWN for next page
 - long press button A for full refresh (circuitpython version)
