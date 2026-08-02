@@ -102,9 +102,13 @@ class _Panel:
 
 
 def _progress_ns():
-    """_convert_progress and its drawing helpers, with the panel stubbed."""
-    src = open(os.path.join(CPDIR, "code.py")).read()
-    width = _const(src, "WIDTH")
+    """_convert_progress and its helpers, with the panel and reader stubbed.
+
+    These live in convert_ui.py rather than code.py: they run only during a
+    conversion, and code.py is compiled into RAM for the whole session.
+    """
+    src = open(os.path.join(CPDIR, "convert_ui.py")).read()
+    width = _const(open(os.path.join(CPDIR, "code.py")).read(), "WIDTH")
     env = {"WIDTH": width}
     bar = _const(src, "_CONV_BAR", env)
     panel = _Panel()
@@ -124,6 +128,7 @@ def _progress_ns():
 
     class _Display:
         fb = _FB()
+        physical_width, physical_height = 128, 296
 
         def text(self, *a, **k):
             pass
@@ -136,6 +141,25 @@ def _progress_ns():
             panel.bars.append(getattr(panel, "cur", 0))
             return True
 
+    disp = _Display()
+
+    class _Reader:
+        """Stands in for code.py, which convert_ui reaches through __main__."""
+        PARTIAL_UPDATES = True
+        _ScratchFrame = _Scratch
+        raw_working_buffer = bytearray(4736)
+        display = disp
+        QUICK_BACK_OK = True
+
+        @staticmethod
+        def update_display_fast(buf, blocking=True):
+            panel.full += 1
+            panel.bars.append(getattr(panel, "cur", 0))
+
+        @staticmethod
+        def show_message(*a, **k):
+            pass
+
     ns = {
         "_CONV_BAR": bar,
         "_CONV_BAND_Y": _const(src, "_CONV_BAND_Y", env),
@@ -144,18 +168,11 @@ def _progress_ns():
         "_CONV_NOTES": _const(src, "_CONV_NOTES", env),
         "_conv": dict(_const(src, "_conv", env)),
         "WIDTH": width,
-        "PARTIAL_UPDATES": True,
-        "display": _Display(),
-        "_ScratchFrame": _Scratch,
-        "raw_working_buffer": bytearray(4736),
+        "display": disp,
+        "reader": _Reader,
+        "gc": type("G", (), {"collect": staticmethod(lambda: None)})(),
         "print": lambda *a, **k: None,
     }
-
-    def update_display_fast(buf, blocking=True):
-        panel.full += 1
-        panel.bars.append(getattr(panel, "cur", 0))
-
-    ns["update_display_fast"] = update_display_fast
 
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name in (
@@ -272,6 +289,34 @@ def test_reader_memory_is_freed_but_the_panel_survives():
     print("  [ok] keep_display spares the drawing buffers, frees the rest")
 
 
+def test_code_py_stays_out_of_the_readers_way():
+    """code.py is compiled into RAM at boot and stays there all session.
+
+    Every byte in it is memory the reader never gets back, so work that runs
+    rarely belongs in a module imported when it is needed. Adding the EPUB
+    conversion UI here grew code.py by 8KB and cost this board its quick-back
+    buffer - the failure surfaced as an unrelated allocation error at startup:
+
+        quick-back disabled: not enough memory for a third page buffer
+        font switch error: memory allocation failed, allocating 4352 bytes
+
+    The budget is not a fixed truth, just a line that has to be argued with
+    rather than crossed by accident. Raise it only with a reason.
+    """
+    size = len(open(os.path.join(CPDIR, "code.py"), "rb").read())
+    budget = 70000
+    assert size <= budget, (
+        f"code.py is {size} bytes, over the {budget} budget by {size - budget}. "
+        "It is resident for the whole session - move rarely-run code into a "
+        "module imported at the point of use, as convert_ui.py does.")
+
+    # and the conversion UI must not have crept back in
+    src = open(os.path.join(CPDIR, "code.py")).read()
+    for leaked in ("_draw_convert_screen", "_convert_progress", "_CONV_BAR"):
+        assert leaked not in src, (
+            f"{leaked} is back in code.py; it belongs in convert_ui.py")
+    print(f"  [ok] code.py is {size} bytes, within the {budget} budget")
+
 if __name__ == "__main__":
     test_picker_lists_unconverted_epubs_only()
     test_epub_and_its_text_agree_on_the_name()
@@ -279,4 +324,5 @@ if __name__ == "__main__":
     test_progress_bar_fills_monotonically_and_completely()
     test_zero_chapters_does_not_divide_by_zero()
     test_reader_memory_is_freed_but_the_panel_survives()
+    test_code_py_stays_out_of_the_readers_way()
     print("\nALL CONVERT CHECKS PASSED")

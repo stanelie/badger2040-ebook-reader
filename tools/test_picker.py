@@ -192,18 +192,23 @@ def test_font_switch_failure_keeps_index_and_font_in_step():
     assert ns["font_index"] == 2 and ns["FONT"].path == "c.pf", (
         "the font that failed was skipped on the next press")
 
-    # Whether both fonts are live at once is a memory property, and the stub
-    # above allocates nothing, so it cannot be observed by running the code -
-    # but it decides whether a switch needs room for one font or two. Pinned
-    # structurally instead: the old one must be dropped before the new load.
+    # Memory behaviour cannot be observed here - the stub allocates nothing -
+    # but the ORDER decides whether a failed switch can leave the reader with
+    # no font. Releasing the old font before the first attempt is cheaper and
+    # was tried; it turns "the switch failed" into "there is no font", which is
+    # unrecoverable. So the drop must happen only inside a MemoryError handler,
+    # after the ordinary attempt has already failed.
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "cycle_font":
             body = ast.get_source_segment(src, node)
+    first_load = body.find("FONT = propfont.PropFont")
     drop = body.find("FONT = None")
-    load = body.find("FONT = propfont.PropFont")
-    assert 0 <= drop < load, (
-        "cycle_font loads the new font while the old one is still referenced, "
-        "so a switch needs room for two fonts instead of one")
+    assert 0 <= first_load < drop, (
+        "cycle_font releases the old font before its first load attempt; a "
+        "failure then leaves the reader with no font at all")
+    handler = body.find("except MemoryError:")
+    assert 0 <= handler < drop, (
+        "the old font is released outside the MemoryError fallback")
     print("  [ok] a failed font switch leaves index and FONT in step")
 
 if __name__ == "__main__":

@@ -123,6 +123,13 @@ because each e-ink update is time the conversion is not using.
 Also checks `free_reader_memory(keep_display=True)` spares exactly the buffers
 the progress screen draws through while still releasing the rest.
 
+And it holds `code.py` to a size budget. code.py is compiled into RAM when the
+board boots and stays resident for the whole session, so every byte in it is
+memory the reader never gets back - adding the conversion UI there once grew it
+by 8KB and cost the board its quick-back buffer, surfacing as an unrelated
+allocation failure at startup. Rarely-run code belongs in a module imported at
+the point of use, which is what `convert_ui.py` is.
+
 ## Font builders
 
 These need Pillow (`pip install Pillow`) and are only run when changing fonts.
