@@ -344,6 +344,11 @@ def test_the_reader_stays_out_of_its_own_way():
     # point of it - and it buys back far more than it costs: a conversion boot
     # now skips the 31.5KB pattern blob, the font and three screen buffers.
     #
+    # 68600 -> 69700: the long-press skip backwards. A feature, and the reader
+    # is precompiled now, so this is memory alone rather than memory and boot
+    # time. The obvious ~1KB to hand back when it is wanted is the boot timing
+    # instrumentation, which has answered the question it was added for.
+    #
     # 68000 -> 68600: boot timing prints, added to find where startup time
     # goes, plus the constant that answered them. Diagnostic and temporary -
     # BOOT_TIMING switches the prints off, and when the question is settled
@@ -370,7 +375,7 @@ def test_the_reader_stays_out_of_its_own_way():
     # well below any of these numbers. It was not done here because the gain
     # needed was 189 bytes and the picker is the part of this codebase with the
     # most recent history of subtle breakage.
-    budget = 68600
+    budget = 69700
     assert size <= budget, (
         f"the reader compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "

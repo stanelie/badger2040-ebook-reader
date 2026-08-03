@@ -1603,6 +1603,60 @@ def nav_fast_advance(max_pages=49):
     prev_page_ready = False
 
 
+# Not the mirror of nav_fast_advance, deliberately. Forward, running the offset
+# on is cheap - paginate_text without hyphenation, no rendering. There is no
+# equally cheap way backwards: find_previous_page scans and re-paginates to
+# guess one page back, measured at ~1.4s on this board, so chaining 49 would
+# take over a minute. It is also a heuristic that leaves the real page chain on
+# the first step, so 49 of them would compound a guess 49 times.
+#
+# So it estimates. The page being read gives bytes-per-page, that times the jump
+# gives a byte target, and the target snaps back to the start of a paragraph -
+# a valid page start with no remainder, the same kind of position
+# find_previous_page returns. One scan rather than 49, 0.14s against 68.
+#
+# Landing a page or two out is the nature of a skip. Landing mid-word, or
+# somewhere paginate_text cannot resume from, would not be.
+def nav_fast_back(max_pages=49):
+    """Long-press back: jump about `max_pages` earlier in one step."""
+    global current_offset, current_remainder, prev_page_ready
+
+    if current_offset <= 0:
+        return False
+
+    # Bytes this page consumes, from the page itself rather than an average
+    # over the book - font size and paragraph shape move it about.
+    lines, next_off, _rem = paginate_text(
+        text_file, current_offset, current_remainder, hyphenate=False)
+    span = next_off - current_offset if next_off > current_offset else 350
+
+    target = current_offset - span * max_pages
+    if target < 0:
+        target = 0
+    landing = 0 if target <= 0 else _paragraph_start(text_file, target)
+    if landing >= current_offset:
+        # The estimate did not move us; fall back to one real page back so a
+        # long press never does nothing.
+        prev = find_previous_page(current_offset)
+        if not prev or prev[0] >= current_offset:
+            return False
+        landing, rem = prev
+    else:
+        rem = b""
+
+    current_offset, current_remainder = landing, rem
+    # The way back recorded in history describes pages we have just jumped over.
+    history_clear()
+
+    render_page_to_buffer(current_offset, current_remainder, current_rotated_buffer)
+    update_display_fast(current_rotated_buffer)
+    prerender_next()
+    # Same reasoning as the forward skip: whoever just jumped is not about to
+    # ask for the page adjacent to where they came from.
+    prev_page_ready = False
+    return True
+
+
 def nav_page_up():
     """Go back one page, instantly when the previous page is already buffered.
     Returns True if the position moved."""
@@ -2028,14 +2082,21 @@ while True:
 
         led_off()
 
-    # PAGE UP
+    # PAGE UP - short press goes back one page, long press skips back
     if button_pressed(buttons["up"]):
         led_on()
+        press_start = time.monotonic()
         while button_pressed(buttons["up"]):
             time.sleep(0.05)
 
-        if nav_page_up():
-            maybe_save_state()  # Periodic save only
+        # The same 0.7s the forward skip uses, so the two feel like one gesture
+        # in opposite directions. Measured after release rather than acting on
+        # the way down: going back one page cannot be undone by holding on.
+        if time.monotonic() - press_start > 0.7:
+            if nav_fast_back():
+                force_save_state()      # jumped far; save it properly
+        elif nav_page_up():
+            maybe_save_state()          # periodic save only
 
         gc.collect()
         led_off()

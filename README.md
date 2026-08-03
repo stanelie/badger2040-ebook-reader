@@ -74,6 +74,9 @@ Usage :
   keep it
 - button A brings up the file picker, up and down arrows to select book, button A again to choose book
 - button UP for previous page, button DOWN for next page
+- hold either for about a second to skip several pages that way. Forward runs the offset on
+  page by page; back estimates from the page you are on and snaps to a paragraph, because
+  scanning back one page at a time costs about 1.4s each on this board
 - long press button A for full refresh (circuitpython version)
 - when it sleeps it shows the book's cover, if that book has one, and says "Sleeping..."
   otherwise. The cover is turned a quarter-turn and scaled to fill the whole screen, so its

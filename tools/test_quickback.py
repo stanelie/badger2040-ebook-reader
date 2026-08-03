@@ -268,6 +268,101 @@ def test_previous_page_is_not_rendered_speculatively_at_boot_or_after_a_skip():
     print("  [ok] no speculative back-page at boot or after a skip; "
           "quick-back intact")
 
+def test_fast_back_jumps_without_chaining_scans():
+    """Long-press back has to estimate, not walk.
+
+    Forward, a skip runs the offset on with paginate_text and no rendering,
+    which is cheap. There is no cheap backwards equivalent: find_previous_page
+    scans and re-paginates to guess a single page back - measured at ~1.4s on
+    the board - so 49 chained would take over a minute. It is also a heuristic
+    that leaves the true page chain on the first step, so 49 would compound a
+    guess 49 times.
+
+    So the jump is estimated from the current page's byte span and snapped to a
+    paragraph start. Landing a page or two out is the nature of a skip. What it
+    must not do is land mid-word, or anywhere paginate_text cannot resume from.
+    """
+    import ast as _ast
+    import tempfile
+
+    ns, _font = load_engine(available_fonts()[0])
+    body = open(make_corpus()["prose"], "rb").read()
+    big = os.path.join(tempfile.mkdtemp(), "big.txt")
+    open(big, "wb").write(body * 80)
+    ns["text_file"] = big
+
+    src = open(READER).read()
+    scans = {"n": 0}
+    real_fpp = ns["find_previous_page"]
+
+    def counting_fpp(target):
+        scans["n"] += 1
+        return real_fpp(target)
+
+    for node in _ast.parse(src).body:
+        if isinstance(node, _ast.FunctionDef) and node.name == "nav_fast_back":
+            exec(_ast.get_source_segment(src, node), ns)
+    ns.update({"render_page_to_buffer": lambda *a: None,
+               "update_display_fast": lambda *a, **k: None,
+               "prerender_next": lambda: None,
+               "current_rotated_buffer": None, "prev_page_ready": False,
+               "find_previous_page": counting_fpp})
+
+    off, rem = 0, b""
+    for _ in range(60):
+        lines, off, rem = ns["paginate_text"](big, off, rem)
+        if not lines:
+            break
+    ns["current_offset"], ns["current_remainder"] = off, rem
+    # Positions from before the jump, as ordinary reading would have left.
+    ns["page_history"] = [(100, b""), (450, b""), (800, b"")]
+
+    assert ns["nav_fast_back"](49) is True, "a long press back did nothing"
+    land, lrem = ns["current_offset"], ns["current_remainder"]
+    assert 0 <= land < off, f"landed at {land}, not before {off}"
+    assert scans["n"] <= 1, (
+        f"nav_fast_back called find_previous_page {scans['n']} times; each is "
+        "~1.4s on the board, so this must estimate rather than walk back")
+
+    data = open(big, "rb").read()
+    assert land == 0 or data[land - 2:land] == b"\n\n", (
+        "did not land on a paragraph start, so the page may begin mid-sentence")
+    assert lrem == b"", (
+        "landed with a remainder; a paragraph start has none, and a bogus one "
+        "would put words from elsewhere at the top of the page")
+
+    # the real requirement: the position is one the engine can read on from
+    walked, o, r = 0, land, lrem
+    while o < off and walked < 300:
+        lines, o, r = ns["paginate_text"](big, o, r)
+        if not lines:
+            break
+        walked += 1
+    assert walked > 0, "cannot paginate forward from where the jump landed"
+    assert abs(walked - 49) <= 10, (
+        f"asked to go back 49 pages and landed {walked} away - the estimate is "
+        "not tracking the real page size")
+
+    # The page history records the way back through pages we have just jumped
+    # over. Left in place, the next back press pops one of them and moves
+    # FORWARD, which is the opposite of what was asked for.
+    assert ns["page_history"] == [], (
+        f"history survived the jump ({len(ns['page_history'])} entries); a "
+        "back press would pop a position from before the jump and move forward")
+
+    # edges: near the start it clamps, at the start it declines
+    ns["current_offset"], ns["current_remainder"] = 400, b""
+    ns["nav_fast_back"](49)
+    assert ns["current_offset"] == 0, "a jump past the beginning did not clamp"
+    ns["current_offset"], ns["current_remainder"] = 0, b""
+    assert ns["nav_fast_back"](49) is False, (
+        "claimed to move when already at the start of the book")
+
+    # and the button has to reach it
+    assert "nav_fast_back()" in src, "no long press is wired to the fast back"
+    print(f"  [ok] long-press back jumps {walked} pages in one scan, "
+          "landing on a paragraph start")
+
 def main():
     fonts = sys.argv[1:] or available_fonts()
     if not fonts:
@@ -277,6 +372,7 @@ def main():
         check_font(f)
     # font-independent: what the reader chooses to pre-render, and when
     test_previous_page_is_not_rendered_speculatively_at_boot_or_after_a_skip()
+    test_fast_back_jumps_without_chaining_scans()
     print("\nALL NAVIGATION CHECKS PASSED")
     return 0
 
