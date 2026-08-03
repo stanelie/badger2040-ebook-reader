@@ -56,6 +56,13 @@ Faster boots (optional) :
   `set_next_code_file`.
 - the source tree is never touched, so editing and testing carry on as normal. What you lose
   is reading the code on the board itself.
+- `build/.system/BUILD_STAMP.txt` records when the tree was built, from which commit, and which
+  source file was newest at the time. If the board is behaving like an older version, read that
+  first - a stale `build/`, or a `.py` left beside a `.mpy`, looks exactly like a fix that did
+  not work.
+- always `rm -rf /Volumes/CIRCUITPY/.system` before copying. `cp -R` only adds, so otherwise
+  the old `.py` sits alongside the new `.mpy` and which one CircuitPython picks is not
+  something to leave to chance.
 
 Usage :
 - put .txt or .epub ebook file into /books folder of the badger2040

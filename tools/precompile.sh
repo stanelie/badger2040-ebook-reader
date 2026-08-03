@@ -76,6 +76,18 @@ for m in $MODULES; do
     fi
 done
 
+# A stamp, so "is the board running what I just edited" is answerable. Getting
+# that wrong has cost this project a debugging cycle before, when a cached
+# import meant the old code was still running and the logs looked identical.
+{
+    echo "built:  $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '+dirty')"
+    newest=$(find "$SRC" -name '*.py' -print0 | xargs -0 ls -t 2>/dev/null | head -1)
+    echo "newest source: $(basename "$newest") $(date -r "$newest" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    echo "compiled: $MODULES"
+} > "$OUT/.system/BUILD_STAMP.txt"
+
 echo ""
+echo "  stamped $(head -1 "$OUT/.system/BUILD_STAMP.txt" | cut -d' ' -f2-)"
 echo "  $(($saved / 1024))KB less to compile at every boot"
 echo "  build/ is ready:  cp -R $OUT/. /Volumes/CIRCUITPY/"
