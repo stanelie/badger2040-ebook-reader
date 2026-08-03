@@ -17,6 +17,10 @@ CPDIR = os.path.normpath(os.path.join(HERE, "..", "circuitpython_version"))
 # so a mounted CIRCUITPY shows books rather than machinery.
 SYSDIR = os.path.join(CPDIR, ".system")
 FONTDIR = os.path.join(CPDIR, ".fonts")
+# The reader proper. code.py at the drive root is a small shim that imports it -
+# CircuitPython only accepts source for the file it runs at startup, so the
+# reader lives in .system where it can ship as a .mpy.
+READER = os.path.join(SYSDIR, "reader.py")
 sys.path.insert(0, SYSDIR)
 sys.path.insert(0, CPDIR)
 sys.path.insert(0, HERE)
@@ -26,7 +30,7 @@ import epub_xtract  # noqa: E402
 
 def _load(names, extra=None):
     """Exec the named top-level functions from code.py into a namespace."""
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     ns = {"os": os, "print": lambda *a, **k: None}
     ns.update(extra or {})
     tree = ast.parse(src)
@@ -120,7 +124,7 @@ def _progress_ns():
     conversion, and code.py is compiled into RAM for the whole session.
     """
     src = open(os.path.join(SYSDIR, "convert_ui.py")).read()
-    width = _const(open(os.path.join(CPDIR, "code.py")).read(), "WIDTH")
+    width = _const(open(READER).read(), "WIDTH")
     env = {"WIDTH": width}
     bar = _const(src, "_CONV_BAR", env)
     panel = _Panel()
@@ -321,7 +325,7 @@ def test_code_py_stays_out_of_the_readers_way():
     # CPython's bytecode is not CircuitPython's, but it tracks what actually
     # costs RAM - code and constants - instead of what merely reads long.
     import marshal
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     size = len(marshal.dumps(compile(src, "code.py", "exec")))
     # 63000 -> 64500: shared font buffer, and the on-screen notice when a font
     # switch fails (no serial on battery, so a failure was otherwise a button
@@ -365,7 +369,7 @@ def test_code_py_stays_out_of_the_readers_way():
         "convert_ui.py does.")
 
     # and the conversion UI must not have crept back in
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     for leaked in ("_draw_convert_screen", "_convert_progress", "_CONV_BAR"):
         assert leaked not in src, (
             f"{leaked} is back in code.py; it belongs in convert_ui.py")
@@ -394,7 +398,7 @@ def test_pending_conversion_round_trips_through_nvram():
     because it returns the bytes without closing the gaps, and the archive
     needs a 32KB window in one piece.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     nvm = bytearray(4096)
     ns, _ = _load(("load_pending", "save_pending", "clear_pending"),
                   {"NVM": nvm,
@@ -443,7 +447,7 @@ def test_conversion_boot_skips_the_readers_allocations():
     blob, the font and the page buffers each leave a hole behind when released,
     and it is a contiguous 32KB window the archive needs.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     for guarded in ("hyphenator._load()",
                     "propfont.PropFont(AVAILABLE_FONTS[0][0]",
                     "current_rotated_buffer = bytearray(_BUF_SIZE)"):
@@ -469,7 +473,7 @@ def test_conversion_trigger_runs_after_everything_it_calls():
     font and pattern blob are skipped far earlier.
     """
     import re
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     ui = open(os.path.join(SYSDIR, "convert_ui.py")).read()
 
     lines = src.splitlines()
@@ -576,7 +580,7 @@ def test_convert_py_writes_nvram_the_reader_can_read():
     """
     import struct
     src = open(os.path.join(SYSDIR, "convert.py")).read()
-    code = open(os.path.join(CPDIR, "code.py")).read()
+    code = open(READER).read()
 
     nvm = bytearray(4096)
     fake = type("MC", (), {})()
@@ -677,25 +681,36 @@ def test_only_code_and_boot_sit_at_the_drive_root():
         assert os.path.exists(os.path.join(FONTDIR, name)), (
             f"{name} is not in .fonts")
 
-    code = open(os.path.join(CPDIR, "code.py")).read()
-    # the hidden folders have to be on the import path before anything from
-    # them is imported, or the board does not boot at all
-    first_import = min(
-        (i for i, l in enumerate(code.splitlines())
-         if l.startswith("import ") and l.split()[1] in
-         ("propfont", "hyphenator", "adafruit_framebuf")),
-        default=None)
-    setup = next((i for i, l in enumerate(code.splitlines())
-                  if "/.system" in l and "sys.path" not in l), None)
-    setup = next(i for i, l in enumerate(code.splitlines()) if '"/.system"' in l)
-    assert first_import is None or setup < first_import, (
-        "code.py imports from /.system before putting it on sys.path")
+    # code.py is a shim now. It must put the hidden folders on the path before
+    # importing the reader, and stay small: it is the one file CircuitPython
+    # will not take precompiled, so all of it is compiled at every boot.
+    shim = open(os.path.join(CPDIR, "code.py")).read()
+    assert len(shim) < 2000, (
+        f"code.py is {len(shim)} bytes; it is compiled from source on every "
+        "boot, so the reader belongs in .system/reader.py where it can ship "
+        "as a .mpy")
+    slines = shim.splitlines()
+    setup = next((i for i, l in enumerate(slines) if '"/.system"' in l), None)
+    imports = next((i for i, l in enumerate(slines)
+                    if l.strip().startswith("import reader")), None)
+    assert setup is not None, "the shim never puts /.system on sys.path"
+    assert imports is not None, "the shim never imports the reader"
+    assert setup < imports, (
+        "the shim imports the reader before putting /.system on sys.path")
+
+    # And the reader has to answer to __main__. epub_xtract, convert_ui,
+    # coverimg and factory all reach back for it that way, and with a shim in
+    # front __main__ is the shim - so each of those lookups would find a module
+    # with none of the reader's globals on it, and fail at the point of use.
+    code = open(READER).read()
+    assert 'sys.modules["__main__"]' in code, (
+        "reader.py does not register itself as __main__; the converter, the "
+        "sleep screen and the factory reset would all find the shim instead")
 
     # nothing may still reference a font or the patterns at the old top level
     import re
-    for where, name in ([(CPDIR, "code.py")] +
-                        [(SYSDIR, f) for f in os.listdir(SYSDIR)
-                         if f.endswith(".py")]):
+    for where, name in [(SYSDIR, f) for f in os.listdir(SYSDIR)
+                        if f.endswith(".py")]:
         text = open(os.path.join(where, name)).read()
         for stale in re.findall(r'"(?!/)[A-Za-z0-9_]+\.(?:pf|bin)"', text):
             raise AssertionError(
@@ -834,7 +849,7 @@ def test_a_conversion_refused_for_usb_stays_queued():
         "the filesystem it would live on is the one that was refused")
 
     # and the reader has to restart when USB goes away
-    code = open(os.path.join(CPDIR, "code.py")).read()
+    code = open(READER).read()
     assert "usb_connected" in code and "_usb_was_connected" in code, (
         "the reader does not notice USB being unplugged, so a queued "
         "conversion waits for a manual reset")
@@ -862,7 +877,7 @@ def test_no_module_level_name_is_used_before_it_exists():
     This exists because a test that merely searched for the name passed: the
     line that *used* it contained it, so the missing definition looked present.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     tree = ast.parse(src)
 
     bound = set(dir(__builtins__)) | {
@@ -930,7 +945,7 @@ def test_tethered_conversion_is_refused_before_restarting():
     what an IDE holding the serial port does - the screen is left reading
     "Restarting..." with nothing happening at all.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "convert_epub":
             body = ast.get_source_segment(src, node)
@@ -975,7 +990,7 @@ def test_first_refresh_drives_every_pixel():
     under-developed image and went paler - so the constant is back at 0. What
     must not happen is it drifting into the page-turn range.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     speed = _const(src, "FIRST_REFRESH_SPEED")
     normal = _const(src, "ORIGINAL_SPEED")
     assert 0 <= speed <= 3, (

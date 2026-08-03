@@ -17,7 +17,8 @@ import tempfile
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import CPDIR, FONTDIR, SYSDIR, INACTIVITY_TIMEOUT_DEFAULT, load_engine
+from _harness import (CPDIR, FONTDIR, SYSDIR, READER,
+                      INACTIVITY_TIMEOUT_DEFAULT, load_engine)
 
 
 class FakeClock:
@@ -111,7 +112,7 @@ def test_save_skipped_without_a_book():
 def test_picker_loop_checks_inactivity():
     """Structural: the picker polls in its own loop, so it must call
     check_inactivity itself or the device can never sleep while it is open."""
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     picker = None
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "file_picker":
@@ -241,7 +242,7 @@ def test_sleep_shows_the_cover_or_leaves_the_page():
 
     # and enter_sleep has to actually call it, without the panel-drawing code
     # creeping back into the resident file
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "enter_sleep":
             body = ast.get_source_segment(src, node)
@@ -549,7 +550,7 @@ def test_opening_the_picker_resets_the_sleep_timer():
     A is held, up to ten seconds for a factory reset, and the press was only
     counted where it began.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
 
     def body_of(name):
         for node in ast.parse(src).body:

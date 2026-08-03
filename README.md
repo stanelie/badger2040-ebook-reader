@@ -48,9 +48,12 @@ Faster boots (optional) :
   format it emits; the first four bytes of any `.mpy` the board already loads say what it
   wants. `43 06 00 1f` is mpy v6.3, which is what CircuitPython 10.1 uses - so a 10.1.0-alpha
   mpy-cross is fine for a 10.1.0-beta board.
-- `code.py` and `convert.py` stay as source: CircuitPython runs those as code files and will
-  not accept `.mpy` for them. To precompile the bulk of `code.py`, it would have to become a
-  shim importing a module that can be.
+- `code.py` is a five-line shim that imports `/.system/reader.py`, which is the reader proper.
+  CircuitPython only accepts source for the file it runs at startup, so this is how the reader's
+  83KB gets precompiled too. `reader.py` registers itself as `__main__`, because the converter,
+  the sleep screen and the factory reset all reach back for the reader that way.
+- `convert.py` stays as source for the same reason - it is run as a code file by
+  `set_next_code_file`.
 - the source tree is never touched, so editing and testing carry on as normal. What you lose
   is reading the code on the board itself.
 

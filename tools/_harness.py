@@ -24,6 +24,10 @@ CPDIR = os.path.normpath(os.path.join(HERE, "..", "circuitpython_version"))
 # device those are absolute (/.system, /.fonts); here they hang off CPDIR.
 SYSDIR = os.path.join(CPDIR, ".system")
 FONTDIR = os.path.join(CPDIR, ".fonts")
+# The reader proper. code.py at the drive root is a five-line shim that imports
+# this - CircuitPython only accepts source for the file it runs at startup, so
+# the reader lives here where it can ship as a .mpy.
+READER = os.path.join(SYSDIR, "reader.py")
 sys.path.insert(0, SYSDIR)
 sys.path.insert(0, CPDIR)
 # adafruit_framebuf is vendored here rather than in the install folder, so a
@@ -85,7 +89,7 @@ def load_engine(font_file):
     hyphenator._load()
     font = propfont.PropFont(os.path.join(FONTDIR, font_file))
 
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     ns = {
         "LINES_PER_PAGE": LINES_PER_PAGE,
         "TEXT_WIDTH": TEXT_WIDTH,

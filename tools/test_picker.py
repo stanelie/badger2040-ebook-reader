@@ -16,13 +16,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import CPDIR, FONTDIR, SYSDIR
+from _harness import CPDIR, FONTDIR, SYSDIR, READER
 
 PER_PAGE = 6
 
 
 def picker_source():
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "file_picker":
             return node, ast.get_source_segment(src, node)
@@ -249,7 +249,7 @@ def test_file_backed_font_renders_identically():
 
     # the reading font must NOT be file-backed: the page renderer's speed comes
     # from shifting bytes out of a resident blob
-    code = open(os.path.join(CPDIR, "code.py")).read()
+    code = open(READER).read()
     for line in code.splitlines():
         if "PropFont(AVAILABLE_FONTS" in line:
             assert "file_backed" not in line, (
@@ -298,7 +298,7 @@ def test_font_switch_failure_keeps_index_and_font_in_step():
 
         font switch error: memory allocation failed, allocating 3840 bytes
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
 
     class Font:
         fail = set()

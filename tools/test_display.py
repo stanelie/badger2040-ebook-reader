@@ -20,7 +20,7 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import CPDIR, FONTDIR, SYSDIR
+from _harness import CPDIR, FONTDIR, SYSDIR, READER
 
 W, H = 296, 128            # logical (rotated) size
 PHYS_W, PHYS_H = 128, 296  # panel size
@@ -179,7 +179,7 @@ def test_xor_band_equals_drawing_the_highlight():
     or its x range were off, the highlight would land on the wrong pixels - so
     the two are compared here directly.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     xor_src = None
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == "_xor_row_band":
@@ -342,7 +342,7 @@ def test_rotation_scratch_is_claimed_before_optional_buffers():
     Claimed at startup instead, a shortage falls on quick-back, which is
     written to lose it gracefully.
     """
-    src = open(os.path.join(CPDIR, "code.py")).read()
+    src = open(READER).read()
     lines = src.splitlines()
 
     def line_of(needle):
@@ -410,7 +410,7 @@ def test_one_screen_buffer_is_shared_not_duplicated():
         "the driver ignores the buffer it is handed and allocates its own")
 
     # every program that builds a display must hand one over
-    for where, name in ((CPDIR, "code.py"), (SYSDIR, "convert.py")):
+    for where, name in ((SYSDIR, "reader.py"), (SYSDIR, "convert.py")):
         src = open(os.path.join(where, name)).read()
         for node in ast.walk(ast.parse(src)):
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "UC8151":
@@ -420,7 +420,7 @@ def test_one_screen_buffer_is_shared_not_duplicated():
                     "screen-sized buffer is allocated after everything else")
 
     # code.py must not then build a third FrameBuffer over the same bytes
-    code = open(os.path.join(CPDIR, "code.py")).read()
+    code = open(READER).read()
     assert "_scratch_fb = display.fb" in code, (
         "code.py builds its own FrameBuffer over raw_working_buffer; the "
         "driver already made one")

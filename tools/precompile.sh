@@ -32,11 +32,11 @@ MPY="$HERE/mpy-cross"
 # the same reason as code.py: it is run AS a code file, by set_next_code_file,
 # and CircuitPython wants source for those.
 #
-# code.py is not here and cannot be:
-# CircuitPython looks for code.py as source and will not run a code.mpy. To
-# precompile the bulk of it, code.py has to become a shim that imports a module
-# which can be - see the README.
-MODULES="uc8151_circuitpython propfont hyphenator inflate uzipfile epub_xtract convert_ui coverimg factory"
+# code.py is not here and cannot be: CircuitPython looks for code.py as source
+# and will not run a code.mpy. That is why the reader itself is reader.py, in
+# .system, with code.py a five-line shim that imports it - so the 83KB that
+# used to be compiled at every boot is precompiled like everything else.
+MODULES="reader uc8151_circuitpython propfont hyphenator inflate uzipfile epub_xtract convert_ui coverimg factory"
 
 if [ ! -x "$MPY" ]; then
     echo "mpy-cross not found at $MPY" >&2

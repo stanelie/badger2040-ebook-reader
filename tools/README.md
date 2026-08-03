@@ -137,7 +137,11 @@ the progress screen draws through while still releasing the rest, and that
 `oldmono.pf`, so the same typeface was shipping twice and costing ~4KB of RAM
 for the copy nobody needed.
 
-It also walks `code.py`'s module level in order and fails on any name read
+The reader itself is `circuitpython_version/.system/reader.py`; `code.py` is a
+shim so the reader can ship precompiled. The harness exports `READER` for it,
+and the tests read that rather than `code.py`.
+
+It also walks the reader's module level in order and fails on any name read
 before it is bound. That is a NameError at boot, on the board, with nothing on
 screen - and it shipped once, because the test guarding it searched for the
 name and found the line that *used* it.
