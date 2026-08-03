@@ -21,12 +21,13 @@ Checked after EVERY simulated button press:
   3. prev_page_ready implies the prev buffer really holds the previous page
   4. the buffers never alias into the same object
 """
+import ast
 import os
 import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import available_fonts, load_engine, make_corpus
+from _harness import READER, available_fonts, load_engine, make_corpus
 
 
 class Buf:
@@ -218,6 +219,55 @@ def check_font(font_file):
           f"without {costs[False]}")
 
 
+def test_previous_page_is_not_rendered_speculatively_at_boot_or_after_a_skip():
+    """Two places where rendering the page behind is wasted work.
+
+    At startup it cost 2.55s of a 9.1s boot - the slowest single step, because
+    find_previous_page scans backwards from a paragraph boundary - and nobody
+    picking up a book they were reading presses back first.
+
+    After a long-press skip the same applies: someone who just jumped forward
+    is going forward, and the page they skipped past costs as much to render as
+    the one they asked for.
+
+    Pressing up still works in both cases. It renders then, which is the same
+    work moved to where it is wanted.
+    """
+    src = open(READER).read()
+
+    # boot: the module-level pre-render must ask for next only
+    lines = src.splitlines()
+    boot = [i for i, l in enumerate(lines) if l.startswith("prerender_")]
+    called = [lines[i].strip() for i in boot]
+    assert "prerender_next()" in called, "boot no longer pre-renders the next page"
+    assert "prerender_prev()" not in called, (
+        "boot pre-renders the previous page again; measured at 2.55s of a 9.1s "
+        "startup, in front of the first page appearing")
+
+    for name, why in (
+            ("nav_fast_advance", "a long-press skip goes forward"),):
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                body = ast.get_source_segment(src, node)
+        assert "prerender_next()" in body, f"{name} no longer pre-renders ahead"
+        assert "prerender_prev()" not in body, (
+            f"{name} pre-renders the page behind - {why}, and that render "
+            "costs about a second with the reader unresponsive for it")
+        assert "prev_page_ready = False" in body, (
+            f"{name} leaves prev_page_ready as it found it; the buffer it "
+            "points at is no longer the page behind")
+
+    # but ordinary back-navigation must still pre-render, or quick-back is only
+    # ever the one press after reading forward
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "nav_page_up":
+            body = ast.get_source_segment(src, node)
+    assert "prerender_prev()" in body, (
+        "nav_page_up no longer pre-renders the page before; consecutive back "
+        "presses would each render on demand and quick-back would be pointless")
+    print("  [ok] no speculative back-page at boot or after a skip; "
+          "quick-back intact")
+
 def main():
     fonts = sys.argv[1:] or available_fonts()
     if not fonts:
@@ -225,6 +275,8 @@ def main():
         return 1
     for f in fonts:
         check_font(f)
+    # font-independent: what the reader chooses to pre-render, and when
+    test_previous_page_is_not_rendered_speculatively_at_boot_or_after_a_skip()
     print("\nALL NAVIGATION CHECKS PASSED")
     return 0
 

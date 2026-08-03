@@ -1573,8 +1573,9 @@ def nav_page_down():
 
 def nav_fast_advance(max_pages=49):
     """Long-press skip: run the offset forward without rendering the pages
-    passed over, then draw where we land and rebuild both neighbours."""
+    passed over, then draw where we land and rebuild the page ahead."""
     global current_offset, current_remainder
+    global prev_page_ready
 
     for i in range(max_pages):
         # Skip hyphenation here: these pages are only used to advance the
@@ -1594,7 +1595,12 @@ def nav_fast_advance(max_pages=49):
     update_display_fast(current_rotated_buffer)
     # Jumped far, so the buffered neighbours are no longer adjacent
     prerender_next()
-    prerender_prev()
+    # The page behind is not rendered. Someone who just skipped ahead is going
+    # forward, and rendering the page they skipped past costs as much as the
+    # one they asked for - about a second, with the reader unresponsive for it.
+    # Pressing up still works; it renders then, which is the same work moved to
+    # where it is actually wanted.
+    prev_page_ready = False
 
 
 def nav_page_up():
@@ -1635,6 +1641,9 @@ def nav_page_up():
 
     if not next_came_free:
         prerender_next()
+    # The page before this one, so a second back press is instant too. This is
+    # what quick-back is: dropping it here would leave the feature working only
+    # for the first press after reading forward.
     prerender_prev()
     return True
 
@@ -1973,12 +1982,11 @@ else:
 
 _boot_mark("  panel")
 
-# Pre-render the neighbouring pages so the first press either way is instant
+# Only the page ahead. The page behind cost 2.55s of a 9.1s startup, measured,
+# and nobody picking up a book they were reading presses "back" first - so it
+# is rendered when it is asked for rather than in front of the first page.
 prerender_next()
-_boot_mark("  next pre-rendered")
-prerender_prev()
-
-_boot_mark("prev pre-rendered")
+_boot_mark("next pre-rendered")
 
 # Save initial state
 force_save_state()
