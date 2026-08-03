@@ -305,8 +305,17 @@ def test_reader_memory_is_freed_but_the_panel_survives():
     print("  [ok] keep_display spares the drawing buffers, frees the rest")
 
 
-def test_code_py_stays_out_of_the_readers_way():
-    """code.py is compiled into RAM at boot and stays there all session.
+def test_the_reader_stays_out_of_its_own_way():
+    """The reader is resident for the whole session, so its size is memory.
+
+    It used to be compiled at every boot as well, which is why this budget was
+    first drawn. That part is gone - it ships as a .mpy now - and the measured
+    effect was the compile stage disappearing from boot entirely, along with
+    6KB more free memory and a largest free block that went from 2048 to 32768.
+
+    What has not changed is that every byte of it is held for as long as the
+    board is running. Work that runs rarely still belongs in a module imported
+    at the point of use.
 
     Every byte in it is memory the reader never gets back, so work that runs
     rarely belongs in a module imported when it is needed. Adding the EPUB
@@ -326,7 +335,7 @@ def test_code_py_stays_out_of_the_readers_way():
     # costs RAM - code and constants - instead of what merely reads long.
     import marshal
     src = open(READER).read()
-    size = len(marshal.dumps(compile(src, "code.py", "exec")))
+    size = len(marshal.dumps(compile(src, "reader.py", "exec")))
     # 63000 -> 64500: shared font buffer, and the on-screen notice when a font
     # switch fails (no serial on battery, so a failure was otherwise a button
     # that did nothing).
@@ -363,7 +372,7 @@ def test_code_py_stays_out_of_the_readers_way():
     # most recent history of subtle breakage.
     budget = 68600
     assert size <= budget, (
-        f"code.py compiles to {size} bytes, over the {budget} budget by "
+        f"the reader compiles to {size} bytes, over the {budget} budget by "
         f"{size - budget}. It is resident for the whole session - move "
         "rarely-run code into a module imported at the point of use, as "
         "convert_ui.py does.")
@@ -388,7 +397,7 @@ def test_code_py_stays_out_of_the_readers_way():
             stripped = line.strip()
             if stripped.startswith(("import ", "from ")) and "vga2_8x16" in stripped:
                 raise AssertionError(f"{f} imports vga2_8x16 again: {stripped}")
-    print(f"  [ok] code.py is {size} bytes, within the {budget} budget")
+    print(f"  [ok] reader is {size} bytes resident, within the {budget} budget")
 
 def test_pending_conversion_round_trips_through_nvram():
     """The queued path must survive a restart, and never boot-loop.
@@ -1034,7 +1043,7 @@ if __name__ == "__main__":
     test_conversion_trigger_runs_after_everything_it_calls()
     test_failed_conversion_does_not_become_the_active_book()
     test_convert_py_writes_nvram_the_reader_can_read()
-    test_code_py_stays_out_of_the_readers_way()
+    test_the_reader_stays_out_of_its_own_way()
     test_only_code_and_boot_sit_at_the_drive_root()
     test_progress_forces_a_full_refresh_periodically()
     test_a_conversion_refused_for_usb_stays_queued()
